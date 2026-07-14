@@ -7,7 +7,7 @@
 
 > "High-performance Solar System simulation powered by Vulkan API."
 
-![AstroScale Demo](assets/demo.mp4)
+![AstroScale Demo](assets/demo.gif)
 
 ---
 
