@@ -1,0 +1,89 @@
+#version 450
+
+// 1. 카메라 위치와 시간 정보가 담긴 기존 UBO
+layout(std140, binding = 0) uniform UBO {
+    mat4 view;
+    mat4 proj;
+    vec3 cameraPos;
+    float time;
+    vec3 sunPos;
+    float sunRadius;
+    vec3 earthPos;
+    float earthRadius;
+    vec3 moonPos;
+    float moonRadius;
+    mat4 lightSpaceMatrix;
+} ubo;
+
+// C++과 똑같이 맞춘 80바이트짜리 구조체
+struct AsteroidData {
+    mat4 transform;
+    int type;
+    int pad1, pad2, pad3;
+};
+
+// 2. CPU가 맨 처음 딱 한 번만 올려줄 2만 개의 원본 소행성 데이터
+layout(std430, binding = 1) readonly buffer InAsteroids {
+    AsteroidData inAsteroids[];
+};
+
+// 3. 셰이더가 거리를 계산해서 다시 분리해 넣을 12구역의 거대한 출력 바구니 
+// (20000개씩 12종류 = 240,000칸)
+layout(std430, binding = 2) writeonly buffer OutMatrices {
+    mat4 outMatrices[240000];
+};
+
+// 4. 대망의 'GPU 간접 그리기 명령어 (Indirect Draw Command)'
+// GPU가 스스로 "이 바구니엔 몇 개가 들어있으니 몇 번 그려라" 하고 자신에게 명령을 내립니다!
+struct DrawCommand {
+    uint indexCount;    // 모델의 정점 인덱스 개수
+    uint instanceCount; // ★ 이번 프레임에 그려질 소행성 개수 (우리가 Atomic으로 숫자를 올릴 곳)
+    uint firstIndex;    // 인덱스 버퍼 시작점
+    int  vertexOffset;  // 버텍스 오프셋
+    uint firstInstance; // 배열 내 시작 위치 (0, 20000, 40000 ...)
+};
+
+layout(std430, binding = 3) buffer DrawCommands {
+    DrawCommand draws[12];
+};
+
+// 한 번에 256개의 GPU 코어(Thread)가 동시에 투입됩니다.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= 20000) return; // 전체 소행성 개수를 넘어가면 스레드 종료
+
+    AsteroidData ast = inAsteroids[idx];
+
+    // 1. 소행성 공전 애니메이션 수학 (CPU의 astRot를 GPU로 가져왔습니다!)
+    float t = ubo.time * 0.05;
+    float c = cos(t);
+    float s = sin(t);
+    mat4 astRot = mat4(
+        c, 0, -s, 0,
+        0, 1,  0, 0,
+        s, 0,  c, 0,
+        0, 0,  0, 1
+    );
+
+    mat4 finalTransform = astRot * ast.transform;
+    vec3 worldPos = vec3(finalTransform[3]);
+
+    // 2. 카메라와의 거리 계산 및 LOD 판별
+    float dist = distance(worldPos, ubo.cameraPos);
+    int lod = 2; // 기본 저화질
+    if (dist < 40.0) lod = 0;      // 최고화질
+    else if (dist < 80.0) lod = 1; // 중간화질
+
+    // 3. 12개의 바구니 중 어디로 들어갈지 번호 계산 (0 ~ 11)
+    int type = ast.type;
+    int bucketIndex = lod * 4 + type;
+
+    // 4. ★ 핵심기술: Atomic 연산으로 충돌 없이 안전하게 내 자리 번호표를 뽑습니다.
+    uint insertPos = atomicAdd(draws[bucketIndex].instanceCount, 1);
+
+    // 5. 발급받은 번호표 위치에 계산이 끝난 3D 행렬 데이터를 쏙 집어넣습니다!
+    uint outputOffset = draws[bucketIndex].firstInstance + insertPos;
+    outMatrices[outputOffset] = finalTransform;
+}

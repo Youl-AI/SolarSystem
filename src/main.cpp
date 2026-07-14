@@ -1,0 +1,1924 @@
+#include "VulkanBase.hpp"
+#include "Camera.hpp"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+#define TINYEXR_IMPLEMENTATION
+#define TINYEXR_USE_MINIZ 0       // miniz.h와 miniz.c를 찾지 마!
+#define TINYEXR_USE_STB_ZLIB 1    // 대신 이미 있는 stb_image의 zlib 코드를 사용해!
+#include "tinyexr.h"
+
+// [NEW] OBJ 로더 및 난수 생성 라이브러리 추가
+#define TINYOBJLOADER_IMPLEMENTATION
+#include "tiny_obj_loader.h"
+#include <random>
+
+#include <chrono>
+#include <vector>
+
+#include "imgui.h"
+#include "backends/imgui_impl_glfw.h"
+#include "backends/imgui_impl_vulkan.h"
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+struct PushConstants {
+    alignas(16) glm::mat4 model;
+    int objectType; 
+    float customData;
+};
+
+struct UniformBufferObject {
+    glm::mat4 view;
+    glm::mat4 proj;
+    alignas(16) glm::vec3 cameraPos;
+    float time;
+    alignas(16) glm::vec3 sunPos;
+    float sunRadius;
+    alignas(16) glm::vec3 earthPos;
+    float earthRadius;
+    alignas(16) glm::vec3 moonPos;
+    float moonRadius;
+    alignas(16) glm::mat4 lightSpaceMatrix; 
+};
+
+struct Planet {
+    std::string name; int typeId;
+    float radius; float orbitRadius; float orbitSpeed; float eccentricity; float rotationSpeed; float axialTilt; bool hasClouds;
+    
+    float orbitalInclination; 
+    float periapsisAngle;     
+    float ascendingNode;      
+    float initialAngle;       
+    float axisDirection;
+
+    float realRadius = 1.0f;
+    float realOrbit = 1.0f;
+    
+    // 🚀 [NEW] 위성 시스템을 위한 부모 행성 인덱스 (-1이면 태양을 공전)
+    int parentIndex = -1; 
+
+    glm::mat4 currentModelMat; glm::vec3 currentPosition; glm::mat4 cloudModelMat;
+    VkImageView viewDiffuse, viewNight, viewSpecular, viewNormal, viewClouds;
+    VkDescriptorSet descriptorSet;
+};
+
+struct AsteroidData {
+    glm::mat4 transform;
+    int type;
+    int pad1, pad2, pad3;
+};
+
+class SolarSystemApp : public VulkanBase {
+private:
+    Camera camera;
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+
+    bool isRealScaleMode = false;
+    bool showOrbits = false; // 디폴트는 OFF
+    float scaleLerp = 0.0f;  // 0.0(시각 비율) ~ 1.0(리얼 비율) 사이를 스르륵 오가는 타이머
+
+    VkDescriptorSetLayout descriptorSetLayout;
+    VkPipelineLayout pipelineLayout;
+    VkPipeline graphicsPipeline;
+    VkPipeline linePipeline;
+    VkDescriptorPool descriptorPool;
+    VkDescriptorPool imguiPool;
+
+    VkBuffer vertexBuffer; VkDeviceMemory vertexBufferMemory;
+    VkBuffer indexBuffer; VkDeviceMemory indexBufferMemory;
+    VkBuffer uniformBuffer; VkDeviceMemory uniformBufferMemory;
+    void *uniformBufferMapped;
+
+    // =========================================================
+    // 🚀 [NEW] GPU-Driven 소행성 파이프라인 전용 버퍼 및 변수
+    // =========================================================
+    std::vector<AsteroidData> asteroidTransforms;
+    
+    // Compute Shader 구동용 파이프라인
+    VkDescriptorSetLayout computeDescriptorSetLayout;
+    VkPipelineLayout computePipelineLayout;
+    VkPipeline computePipeline;
+    VkDescriptorSet computeDescriptorSet;
+
+    // 3가지 핵심 GPU 버퍼
+    VkBuffer computeInputBuffer;  VkDeviceMemory computeInputMem;  // (읽기전용) 원본 2만개
+    VkBuffer computeOutputBuffer; VkDeviceMemory computeOutputMem; // (쓰기전용) 계산 완료된 행렬
+    VkBuffer indirectDrawBuffer;  VkDeviceMemory indirectDrawMem;  // (명령용) GPU 스스로 내릴 명령서
+    void* indirectDrawMapped = nullptr; 
+
+    // 매 프레임 GPU 명령서를 초기화할 CPU 원본 템플릿
+    VkDrawIndexedIndirectCommand drawCmdTemplates[12];
+    
+    // (LOD 정점 기록장은 그대로 유지)
+    uint32_t highLodIndexCount[4], highLodFirstIndex[4]; int32_t highLodVertexOffset[4];
+    uint32_t midLodIndexCount = 0, midLodFirstIndex = 0; int32_t midLodVertexOffset = 0;
+    uint32_t lowLodIndexCount = 0, lowLodFirstIndex = 0; int32_t lowLodVertexOffset = 0;
+    Planet asteroidTypes[4];
+
+    VkSampler textureSampler;
+    VkImage texSkybox, texDummyBlack, texDummyFlatNormal;
+    VkDeviceMemory memSkybox, memDummyBlack, memDummyFlatNormal;
+    VkImageView viewSkybox, viewDummyBlack, viewDummyFlatNormal;
+
+    Planet sun, moon, saturnRing, milkyWay;
+    uint32_t galaxyIndexCount = 0, galaxyFirstIndex = 0;
+    int32_t galaxyVertexOffset = 0;
+    std::vector<Planet> planets;
+
+    uint32_t sphereIndexCount = 0, ringIndexCount = 0, orbitIndexCount = 0, orbitFirstIndex = 0;
+    int32_t ringVertexOffset = 0, orbitVertexOffset = 0;
+
+    int lockedTargetType = 1; int lockedPlanetIndex = 2;
+    int selectedTargetType = -1; 
+    int selectedPlanetIndex = -1;
+    std::chrono::time_point<std::chrono::high_resolution_clock> lastClickTime;
+    float currentAppTime = 0.0f;
+    bool isPaused = false;
+
+    std::vector<VkImage> allImages;
+    std::vector<VkDeviceMemory> allMemories;
+    std::vector<VkImageView> allViews;
+
+    // 🚀 [추가] 천체 정보를 반환하는 도서관 함수
+    std::string getCelestialInfo(const std::string& name) {
+        // 1. 항성 및 지구형 행성
+        if (name == "Sun") return "Diameter: 1,392,700 km\nMass: 1.989 x 10^30 kg\nSurface Temp: 5,500 °C\nType: Yellow Dwarf (G2V)";
+        if (name == "Mercury") return "Diameter: 4,879 km\nMass: 3.30 x 10^23 kg\nGravity: 3.7 m/s^2\nDay Length: 58d 15h";
+        if (name == "Venus") return "Diameter: 12,104 km\nMass: 4.87 x 10^24 kg\nGravity: 8.87 m/s^2\nSurface Temp: 462 °C";
+        if (name == "Earth") return "Diameter: 12,742 km\nMass: 5.97 x 10^24 kg\nGravity: 9.8 m/s^2\nSurface Temp: 14 °C";
+        if (name == "Mars") return "Diameter: 6,779 km\nMass: 6.39 x 10^23 kg\nGravity: 3.71 m/s^2\nMoons: Phobos, Deimos";
+        
+        // 2. 목성형 행성 (가스/얼음 거성)
+        if (name == "Jupiter") return "Diameter: 139,820 km\nMass: 1.89 x 10^27 kg\nGravity: 24.79 m/s^2\nType: Gas Giant";
+        if (name == "Saturn") return "Diameter: 116,460 km\nMass: 5.68 x 10^26 kg\nGravity: 10.44 m/s^2\nType: Gas Giant";
+        if (name == "Uranus") return "Diameter: 50,724 km\nMass: 8.68 x 10^25 kg\nGravity: 8.69 m/s^2\nType: Ice Giant";
+        if (name == "Neptune") return "Diameter: 49,244 km\nMass: 1.02 x 10^26 kg\nGravity: 11.15 m/s^2\nType: Ice Giant";
+
+        // 3. 주요 위성 (지구, 목성, 토성)
+        if (name == "Moon") return "Diameter: 3,474 km\nMass: 7.34 x 10^22 kg\nGravity: 1.62 m/s^2\nType: Earth's Moon";
+        if (name == "Io") return "Diameter: 3,642 km\nMass: 8.93 x 10^22 kg\nGravity: 1.79 m/s^2\nType: Galilean Moon (Volcanic)";
+        if (name == "Europa") return "Diameter: 3,121 km\nMass: 4.79 x 10^22 kg\nGravity: 1.31 m/s^2\nType: Galilean Moon (Ice Ocean)";
+        if (name == "Ganymede") return "Diameter: 5,268 km\nMass: 1.48 x 10^23 kg\nGravity: 1.42 m/s^2\nType: Galilean Moon (Largest)";
+        if (name == "Callisto") return "Diameter: 4,820 km\nMass: 1.07 x 10^23 kg\nGravity: 1.23 m/s^2\nType: Galilean Moon (Cratered)";
+        if (name == "Titan") return "Diameter: 5,149 km\nMass: 1.34 x 10^23 kg\nGravity: 1.35 m/s^2\nType: Saturnian Moon (Atmosphere)";
+
+        // 4. 왜소행성 (소행성대 및 카이퍼 벨트)
+        if (name == "Ceres") return "Diameter: 939 km\nMass: 9.39 x 10^20 kg\nGravity: 0.28 m/s^2\nType: Dwarf Planet (Asteroid Belt)";
+        if (name == "Pluto") return "Diameter: 2,376 km\nMass: 1.30 x 10^22 kg\nGravity: 0.62 m/s^2\nType: Dwarf Planet (Kuiper Belt)";
+        if (name == "Haumea") return "Diameter: ~1,632 km\nMass: 4.01 x 10^21 kg\nGravity: 0.40 m/s^2\nType: Dwarf Planet (Oblong)";
+        if (name == "Makemake") return "Diameter: 1,430 km\nMass: ~3.1 x 10^21 kg\nGravity: 0.50 m/s^2\nType: Dwarf Planet";
+        if (name == "Eris") return "Diameter: 2,326 km\nMass: 1.66 x 10^22 kg\nGravity: 0.82 m/s^2\nType: Dwarf Planet (Scattered Disc)";
+
+        // 예외 처리 (엔진에 추가될 미지의 소행성 대비)
+        return "Diameter: N/A\nMass: Unknown\nGravity: Unknown\nType: Celestial Body";
+    }
+
+    VkImage offscreenColorImage, offscreenBrightImage, offscreenDepthImage;
+    VkDeviceMemory offscreenColorMem, offscreenBrightMem, offscreenDepthMem;
+    VkImageView offscreenColorView, offscreenBrightView, offscreenDepthView;
+    VkRenderPass offscreenRenderPass;
+    VkFramebuffer offscreenFramebuffer;
+    VkSampler offscreenSampler;
+
+    VkImage blurImages[2];
+    VkDeviceMemory blurMemories[2];
+    VkImageView blurViews[2];
+    VkRenderPass blurRenderPass;
+    VkFramebuffer blurFramebuffers[2];
+    VkDescriptorSetLayout blurDescriptorSetLayout;
+    VkPipelineLayout blurPipelineLayout;
+    VkPipeline blurPipeline;
+    VkDescriptorSet blurDescriptorSets[3];
+
+    VkDescriptorSetLayout postDescriptorSetLayout;
+    VkPipelineLayout postPipelineLayout;
+    VkPipeline postPipeline;
+    VkDescriptorSet postDescriptorSet;
+
+    VkImage shadowImage;
+    VkDeviceMemory shadowMemory;
+    VkImageView shadowView;
+    VkSampler shadowSampler;
+    VkRenderPass shadowRenderPass;
+    VkFramebuffer shadowFramebuffer;
+    VkPipeline shadowPipeline;
+    VkPipelineLayout shadowPipelineLayout;
+
+    enum class AppState { LOBBY, SIMULATION };
+    AppState currentAppState = AppState::LOBBY;
+
+    // 🚀 [NEW] 개기일식 시네마틱 모드 변수
+    bool isEclipseEvent = false;
+
+protected:
+    void onMouseButton(int button, int action, int mods) override {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.WantCaptureMouse) return;
+
+        if (button == GLFW_MOUSE_BUTTON_LEFT) {
+            if (action == GLFW_PRESS) {
+                // 🚀 [NEW] Lobby 상태일 땐 레이캐스팅(행성 클릭) 및 카메라 조작을 원천 차단합니다!
+                if (currentAppState == AppState::LOBBY) return; 
+                
+                camera.mousePressed = true;
+                glfwGetCursorPos(window, &camera.lastX, &camera.lastY);
+                auto now = std::chrono::high_resolution_clock::now();
+                bool isDoubleClick = (std::chrono::duration<float>(now - lastClickTime).count() < 0.3f);
+                handleRaycast(camera.lastX, camera.lastY, isDoubleClick);
+                lastClickTime = now;
+            } else if (action == GLFW_RELEASE) camera.mousePressed = false;
+        }
+    }
+    
+    void onMouseMove(double xpos, double ypos) override { 
+        // 🚀 [수정] ImGui UI를 조작 중이거나, Lobby 상태일 땐 화면 회전을 막습니다.
+        if (ImGui::GetIO().WantCaptureMouse || currentAppState == AppState::LOBBY) return;
+        camera.processMouseDrag(xpos, ypos); 
+    }
+    
+    void onMouseScroll(double xoffset, double yoffset) override { 
+        // 🚀 [수정] ImGui UI를 조작 중이거나, Lobby 상태일 땐 줌인/줌아웃을 막습니다.
+        if (ImGui::GetIO().WantCaptureMouse || currentAppState == AppState::LOBBY) return;
+        camera.processMouseScroll(yoffset); 
+    }
+
+    void handleRaycast(double xpos, double ypos, bool isDoubleClick) {
+        float ndcX = (2.0f * (float)xpos) / swapChainExtent.width - 1.0f;
+        float ndcY = (2.0f * (float)ypos) / swapChainExtent.height - 1.0f;
+        glm::mat4 proj = glm::perspective(glm::radians(camera.fov), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 1000000.0f);
+        proj[1][1] *= -1;
+        glm::mat4 view = camera.getViewMatrix();
+        
+        float minT = FLT_MAX; int hitType = -1; int hitIndex = -1;
+
+        // 🚀 [추가 1] 2D 네임태그(UI 박스) 클릭 검사 함수
+        auto check2DBoxHit = [&](glm::vec3 worldPos, const std::string& name, int type, int idx, float yOffset) {
+            glm::vec2 sc;
+            if (worldToScreen(worldPos, view, proj, swapChainExtent.width, swapChainExtent.height, sc)) {
+                // 🚀 [수정됨] ImGui 폰트 측정기로 정확한 텍스트 픽셀 크기 계산
+                ImVec2 textSize = ImGui::CalcTextSize(name.c_str());
+                float w = textSize.x + 16.0f; // 좌우 패딩 포함
+                float h = textSize.y + 8.0f;  // 상하 패딩 포함
+                
+                // 중앙 정렬을 위해 기준점(X)을 전체 길이의 절반만큼 왼쪽으로 뺍니다.
+                float bx = sc.x - (w * 0.5f); 
+                float by = sc.y - yOffset;
+                
+                if (xpos >= bx && xpos <= bx + w && ypos >= by && ypos <= by + h) {
+                    hitType = type; hitIndex = idx; return true;
+                }
+            }
+            return false;
+        };
+
+        bool tagHit = false;
+        if (check2DBoxHit(sun.currentPosition, "Sun", 0, -1, 35.0f)) tagHit = true;
+        if (!tagHit) {
+            for (int i = 0; i < planets.size(); i++) {
+                if (check2DBoxHit(planets[i].currentPosition, planets[i].name, 1, i, 35.0f)) { tagHit = true; break; }
+            }
+        }
+        if (!tagHit) {
+            if (check2DBoxHit(moon.currentPosition, "Moon", 2, -1, 25.0f)) tagHit = true;
+        }
+
+        // 🚀 [추가 2] 2D 태그를 못 눌렀다면 기존처럼 3D 천체 본체 레이캐스팅 진행
+        if (!tagHit) {
+            glm::vec4 eyeCoords = glm::inverse(proj) * glm::vec4(ndcX, ndcY, 0.5f, 1.0f);
+            glm::vec3 rayWorldDir = glm::normalize(glm::vec3(glm::inverse(view) * glm::vec4(eyeCoords.x, eyeCoords.y, -1.0f, 0.0f)));
+            glm::vec3 rayOrigin = camera.target + camera.pos;
+
+            float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp);
+            float curSunRad = glm::mix(sun.radius, sun.realRadius, easeScale);
+            float curMoonRad = glm::mix(moon.radius, moon.realRadius, easeScale);
+
+            auto checkIntersect = [&](glm::vec3 center, float radius, int type, int idx) {
+                glm::vec3 oc = rayOrigin - center;
+                float a = glm::dot(rayWorldDir, rayWorldDir);
+                float b = 2.0f * glm::dot(oc, rayWorldDir);
+                float c = glm::dot(oc, oc) - radius * radius;
+                float discriminant = b * b - 4 * a * c;
+                if (discriminant > 0) {
+                    float t = (-b - sqrt(discriminant)) / (2.0f * a);
+                    if (t > 0 && t < minT) { minT = t; hitType = type; hitIndex = idx; }
+                }
+            };
+
+            checkIntersect(sun.currentPosition, curSunRad, 0, -1);
+            for (int i = 0; i < planets.size(); i++) {
+                float curPlanetRad = glm::mix(planets[i].radius, planets[i].realRadius, easeScale);
+                checkIntersect(planets[i].currentPosition, curPlanetRad, 1, i);
+            }
+            checkIntersect(moon.currentPosition, curMoonRad, 2, -1);
+        }
+
+        // 🚀 [추가 3] 단일 클릭(선택 정보창 띄우기) & 더블 클릭(시점 고정) 분리 처리
+        if (hitType != -1) {
+            selectedTargetType = hitType; 
+            selectedPlanetIndex = hitIndex;
+        }
+
+        if (hitType != -1 && isDoubleClick) { 
+            lockedTargetType = hitType; 
+            lockedPlanetIndex = hitIndex; 
+            
+            float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp);
+            float hitRadius = (hitType == 0 ? glm::mix(sun.radius, sun.realRadius, easeScale) : (hitType == 1 ? glm::mix(planets[hitIndex].radius, planets[hitIndex].realRadius, easeScale) : glm::mix(moon.radius, moon.realRadius, easeScale)));
+            camera.targetDistance = hitRadius * 6.0f; 
+        }
+    }
+
+    void initApp() override {
+        generateSphere(1.0f, 64, 64);
+        sphereIndexCount = static_cast<uint32_t>(indices.size());
+        
+        ringVertexOffset = static_cast<int32_t>(vertices.size());
+        uint32_t ringFirstIdx = static_cast<uint32_t>(indices.size());
+        generateRing(1.2f, 2.2f, 64);
+        ringIndexCount = static_cast<uint32_t>(indices.size()) - ringFirstIdx;
+        
+        orbitVertexOffset = static_cast<int32_t>(vertices.size());
+        orbitFirstIndex = static_cast<uint32_t>(indices.size());
+        generateOrbit(128); 
+
+        orbitIndexCount = static_cast<uint32_t>(indices.size()) - orbitFirstIndex;
+
+        galaxyVertexOffset = static_cast<int32_t>(vertices.size());
+        galaxyFirstIndex = static_cast<uint32_t>(indices.size());
+        generateGalaxyDisk(1.0f, 64);
+        galaxyIndexCount = static_cast<uint32_t>(indices.size()) - galaxyFirstIndex;
+
+        // 1. 4종류의 소행성 모델 순차적 로딩 (대소문자 완벽 일치)
+        std::string objPaths[4] = {
+            "textures/asteroids/Bennu_Radar.obj",
+            "textures/asteroids/gaspra_stooke.obj",
+            "textures/asteroids/Ida_Stooke.obj",
+            "textures/asteroids/Itokawa_Radar.obj"
+        };
+        for (int i = 0; i < 4; i++) {
+            loadObjModel(objPaths[i], highLodIndexCount[i], highLodFirstIndex[i], highLodVertexOffset[i]);
+        }
+
+        // 2. 중간 화질(Mid LOD) 뼈대 생성
+        midLodVertexOffset = static_cast<int32_t>(vertices.size());
+        midLodFirstIndex = static_cast<uint32_t>(indices.size());
+        generateSphere(1.0f, 16, 16); 
+        midLodIndexCount = static_cast<uint32_t>(indices.size()) - midLodFirstIndex;
+
+        // 3. 최하 화질(Low LOD) 뼈대 생성
+        lowLodVertexOffset = static_cast<int32_t>(vertices.size());
+        lowLodFirstIndex = static_cast<uint32_t>(indices.size());
+        generateSphere(1.0f, 6, 6); 
+        lowLodIndexCount = static_cast<uint32_t>(indices.size()) - lowLodFirstIndex;
+
+        // 엔진 필수 리소스 초기화 (삭제 불가)
+        createCubeTextureImage();
+        createTextureSampler();
+        createColorTexture(0, 0, 0, 0, texDummyBlack, memDummyBlack, viewDummyBlack, VK_FORMAT_R8G8B8A8_UNORM);
+        createColorTexture(128, 128, 255, 255, texDummyFlatNormal, memDummyFlatNormal, viewDummyFlatNormal, VK_FORMAT_R8G8B8A8_UNORM);
+        createShadowResources();
+
+        // 4. 2만 개의 소행성 데이터 수학적 생성 (다중 모델 부여 포함) 및 SSBO 업로드
+        asteroidTransforms = generateAsteroidBelt(10000, 9.0f, 12.0f, 0.4f, 0.008f, 0.025f); // 소행성대
+        auto kuiperTransforms = generateAsteroidBelt(30000, 75.0f, 100.0f, 1.5f, 0.08f, 0.25f); // 카이퍼벨트
+        asteroidTransforms.insert(asteroidTransforms.end(), kuiperTransforms.begin(), kuiperTransforms.end()); 
+        
+        // 파이프라인 및 버퍼 초기화 (삭제 불가)
+        createVertexBuffer(); createIndexBuffer(); createUniformBuffer();
+        createDescriptorSetLayout(); createDescriptorPool();
+
+        // 🚀 [수정] 반드시 풀(Pool)과 유니폼 버퍼가 생성된 "다음"에 Compute 자원을 만들어야 합니다!
+        createComputeResources();
+        createOffscreenResources();
+        createBlurResources();
+        createBlurPipeline();
+        createPostProcessPipeline();
+        createShadowPipeline();
+
+        // =========================================================
+        // 🚀 [태양계 전면 재설계] 영역(Domain) 침범 방지 및 연쇄 확장 시스템
+        // 1. 목성을 22.0으로 밀어내어 위성-소행성대 충돌 원천 차단
+        // 2. 외행성들의 거리를 비례에 맞춰 확장 (해왕성 62.0)
+        // 3. 카이퍼벨트(왜소행성)를 해왕성 밖(75.0 ~ 100.0)으로 완벽히 밀어냄
+        // =========================================================
+        
+        sun = createPlanet("Sun", 4, 1.80f, 0.0f, 0.0f, 0.0f, 0.9f, 7.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/sun.jpg", "", "", "", "");
+        
+        // 1. 내행성 (수~화)
+        planets.push_back(createPlanet("Mercury", 0, 0.11f, 3.50f, 15.00f, 0.205f, 0.43f, 0.03f, 7.0f, 77.0f, 48.0f, 120.0f, 45.0f, false, "textures/planets/mercury.jpg", "", "", "", ""));  // index 0
+        planets.push_back(createPlanet("Venus", 0, 0.19f, 4.80f, 11.00f, 0.006f, 0.1f, 177.36f, 3.4f, 131.0f, 76.0f, 30.0f, 100.0f, true, "textures/planets/venus.jpg", "", "", "", "textures/planets/venus_atmosphere.jpg"));  // index 1
+        planets.push_back(createPlanet("Earth", 0, 0.20f, 6.00f, 10.00f, 0.016f, 25.0f, 23.44f, 0.0f, 102.0f, 0.0f, 200.0f, 0.0f, true, "textures/planets/earth.jpg", "textures/planets/earth_night.jpg", "textures/planets/earth_specular.jpg", "textures/planets/earth_normal.jpg", "textures/planets/earth_clouds.jpg"));  // index 2
+        planets.push_back(createPlanet("Mars", 0, 0.14f, 7.50f, 8.50f, 0.093f, 24.3f, 25.19f, 1.85f, 336.0f, 49.0f, 310.0f, 210.0f, false, "textures/planets/mars.jpg", "", "", "", ""));  // index 3
+        
+        // 2. 소행성대 (세레스가 11.0에서 기준선 역할을 합니다)
+        planets.push_back(createPlanet("Ceres", 1, 0.04f, 11.00f, 6.50f, 0.076f, 66.6f, 4.0f, 10.6f, 73.0f, 80.0f, 0.0f, 0.0f, false, "textures/asteroids/ceres.jpg", "", "", "", ""));  // index 4
+        
+        // 3. 외행성 (목성계 확장에 따른 연쇄 이동 적용)
+        planets.push_back(createPlanet("Jupiter", 9, 0.80f, 22.00f, 4.50f, 0.048f, 60.6f, 3.13f, 1.3f, 14.0f, 100.0f, 45.0f, 30.0f, false, "textures/planets/jupiter.jpg", "", "", "", "")); // index 5 (위성 부모)
+        planets.push_back(createPlanet("Saturn", 9, 0.70f, 34.00f, 3.30f, 0.056f, 56.0f, 26.73f, 2.49f, 92.0f, 113.0f, 150.0f, 120.0f, false, "textures/planets/saturn.jpg", "", "", "", ""));  // index 6 (타이탄 부모)
+        planets.push_back(createPlanet("Uranus", 9, 0.40f, 48.00f, 2.50f, 0.046f, 34.8f, 97.77f, 0.77f, 170.0f, 74.0f, 280.0f, 250.0f, false, "textures/planets/uranus.jpg", "", "", "", ""));  // index 7
+        planets.push_back(createPlanet("Neptune", 9, 0.39f, 62.00f, 2.00f, 0.009f, 37.2f, 28.32f, 1.77f, 44.0f, 131.0f, 90.0f, 80.0f, false, "textures/planets/neptune.jpg", "", "", "", ""));  // index 8
+        
+        // 4. 달 및 토성 고리
+        moon = createPlanet("Moon", 1, 0.08f, 0.75f, 45.0f, 0.054f, 45.0f, 6.68f, 5.14f, 318.0f, 125.0f, 45.0f, 0.0f, false, "textures/moons/moon.jpg", "", "", "textures/moons/moon_disp.jpg", "");
+        saturnRing = createPlanet("SaturnRing", 5, 1.60f, 0.0f, 0.0f, 0.0f, 0.0f, 26.73f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/planets/saturn_ring.png", "", "", "", "");
+        
+        // 5. 카이퍼 벨트 및 왜소행성 (외행성들이 밀려난 만큼, 바깥쪽 영역(75~100)으로 완벽하게 밀려납니다)
+        planets.push_back(createPlanet("Pluto", 1, 0.07f, 75.00f, 1.70f, 0.248f, 3.9f, 122.5f, 17.1f, 113.8f, 110.0f, 90.0f, 0.0f, false, "textures/asteroids/pluto.jpg", "", "", "", "")); // index 9
+        planets.push_back(createPlanet("Haumea", 1, 0.06f, 80.00f, 1.60f, 0.196f, 153.8f, 28.0f, 28.2f, 239.0f, 122.0f, 45.0f, 0.0f, false, "textures/asteroids/haumea.jpg", "", "", "", "")); // index 10
+        planets.push_back(createPlanet("Makemake", 1, 0.05f, 85.00f, 1.50f, 0.161f, 26.3f, 29.0f, 29.0f, 295.0f, 79.0f, 120.0f, 0.0f, false, "textures/asteroids/makemake.jpg", "", "", "", "")); // index 11
+        planets.push_back(createPlanet("Eris", 1, 0.07f, 100.00f, 1.30f, 0.436f, 23.1f, 78.0f, 44.0f, 44.0f, 36.0f, 200.0f, 0.0f, false, "textures/asteroids/eris.jpg", "", "", "", "")); // index 12
+
+        // 6. 목성 & 토성 위성 (목성계 안전 반경 내 공전)
+        Planet io = createPlanet("Io", 1, 0.09f, 1.2f, 40.0f, 0.004f, 40.0f, 0.0f, 0.04f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/moons/io.jpg", "", "", "", ""); 
+        io.parentIndex = 5; planets.push_back(io); 
+        
+        Planet europa = createPlanet("Europa", 1, 0.08f, 1.9f, 20.0f, 0.009f, 20.0f, 0.0f, 0.47f, 0.0f, 0.0f, 45.0f, 0.0f, false, "textures/moons/europa.jpg", "", "", "", ""); 
+        europa.parentIndex = 5; planets.push_back(europa);
+        
+        Planet ganymede = createPlanet("Ganymede", 1, 0.12f, 3.0f, 10.0f, 0.001f, 10.0f, 0.0f, 0.2f, 0.0f, 0.0f, 90.0f, 0.0f, false, "textures/moons/ganymede.jpg", "", "", "", ""); 
+        ganymede.parentIndex = 5; planets.push_back(ganymede);
+        
+        Planet callisto = createPlanet("Callisto", 1, 0.11f, 5.4f, 4.2f, 0.007f, 4.2f, 0.0f, 0.28f, 0.0f, 0.0f, 135.0f, 0.0f, false, "textures/moons/callisto.jpg", "", "", "", ""); 
+        callisto.parentIndex = 5; planets.push_back(callisto);
+
+        Planet titan = createPlanet("Titan", 1, 0.11f, 2.0f, 5.0f, 0.028f, 5.0f, 0.0f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f, true, "textures/moons/titan.jpg", "", "", "", "textures/moons/titan_atmosphere.jpg"); 
+        titan.parentIndex = 6; planets.push_back(titan);
+        
+        // 6. 4가지 소행성 개별 텍스처 로딩 (기존 asteroidBelt 대체)
+        std::string texPaths[4] = {
+            "textures/asteroids/Bennu.jpg",
+            "textures/asteroids/Gaspra.jpg",
+            "textures/asteroids/Ida.jpg",
+            "textures/asteroids/Itokawa.jpg"
+        };
+        for (int i = 0; i < 4; i++) {
+            // 🚀 [수정됨] 소행성은 궤도 연산을 SSBO에서 따로 하므로, 추가된 5대 요소 자리에 0.0f 5개를 빵꾸울워 줍니다!
+            asteroidTypes[i] = createPlanet("AsteroidType" + std::to_string(i), 8, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, texPaths[i], "", "", "", "");
+        }
+
+        milkyWay = createPlanet("Milky Way", 10, 200000.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/milkyway.png", "", "", "", "");
+
+        // =========================================================
+        // 🚀 [NEW] 리얼 스케일(Real Scale) 타겟 데이터 주입
+        // =========================================================
+        sun.realRadius = 54.0f; sun.realOrbit = 0.0f;
+        moon.realRadius = 0.13f; moon.realOrbit = 1.5f; 
+        for (auto& p : planets) {
+            if (p.name == "Mercury") { p.realRadius = 0.19f; p.realOrbit = 195.0f; }
+            else if (p.name == "Venus") { p.realRadius = 0.47f; p.realOrbit = 360.0f; }
+            else if (p.name == "Earth") { p.realRadius = 0.50f; p.realOrbit = 500.0f; }
+            else if (p.name == "Mars") { p.realRadius = 0.26f; p.realOrbit = 760.0f; }
+            else if (p.name == "Ceres") { p.realRadius = 0.03f; p.realOrbit = 1385.0f; }
+            else if (p.name == "Jupiter") { p.realRadius = 5.60f; p.realOrbit = 2600.0f; }
+            else if (p.name == "Saturn") { p.realRadius = 4.72f; p.realOrbit = 4790.0f; }
+            else if (p.name == "Uranus") { p.realRadius = 2.00f; p.realOrbit = 9600.0f; }
+            else if (p.name == "Neptune") { p.realRadius = 1.94f; p.realOrbit = 15050.0f; }
+            else if (p.name == "Pluto") { p.realRadius = 0.09f; p.realOrbit = 19750.0f; }
+            else if (p.name == "Haumea") { p.realRadius = 0.06f; p.realOrbit = 21550.0f; }
+            else if (p.name == "Makemake") { p.realRadius = 0.05f; p.realOrbit = 22650.0f; }
+            else if (p.name == "Eris") { p.realRadius = 0.09f; p.realOrbit = 34000.0f; }
+            else if (p.name == "Io") { p.realRadius = 0.14f; p.realOrbit = 6.2f; } 
+            else if (p.name == "Europa") { p.realRadius = 0.12f; p.realOrbit = 9.8f; }
+            else if (p.name == "Ganymede") { p.realRadius = 0.20f; p.realOrbit = 15.7f; }
+            else if (p.name == "Callisto") { p.realRadius = 0.18f; p.realOrbit = 27.6f; }
+            else if (p.name == "Titan") { p.realRadius = 0.20f; p.realOrbit = 12.2f; }
+        }
+
+        createGraphicsPipeline();
+        initImGui();
+    }
+
+    // =========================================================
+    // 🚀 [NEW] 소행성 생성 엔진 함수들
+    // =========================================================
+    // =========================================================
+    // 🚀 [수정됨] 실제 천문학 기반 소행성대 궤도 생성 알고리즘
+    // =========================================================
+    std::vector<AsteroidData> generateAsteroidBelt(int amount, float minRadius, float maxRadius, float yVariance, float minScale, float maxScale) {
+        std::vector<AsteroidData> result;
+        result.reserve(amount);
+        
+        std::random_device rd; std::mt19937 gen(rd());
+        std::uniform_real_distribution<float> dis(0.0f, 1.0f);
+        std::normal_distribution<float> normalDis(0.0f, 1.0f); 
+
+        for (int i = 0; i < amount; i++) {
+            glm::mat4 model = glm::mat4(1.0f);
+            float angle = dis(gen) * 2.0f * M_PI;
+            float radius = minRadius + dis(gen) * (maxRadius - minRadius) + normalDis(gen) * 0.5f;
+            float x = radius * cos(angle); float y = normalDis(gen) * yVariance; float z = radius * sin(angle);
+            glm::vec3 pos = glm::vec3(x, y, z);
+
+            float inclination = normalDis(gen) * 0.15f; 
+            glm::vec3 tiltAxis = glm::normalize(glm::vec3(dis(gen) * 2.0f - 1.0f, 0.0f, dis(gen) * 2.0f - 1.0f));
+            glm::mat4 orbitTilt = glm::rotate(glm::mat4(1.0f), inclination, tiltAxis);
+            
+            pos = glm::vec3(orbitTilt * glm::vec4(pos, 1.0f));
+            model = glm::translate(model, pos);
+
+            float rotAngle = dis(gen) * 2.0f * M_PI;
+            glm::vec3 rotAxis = glm::normalize(glm::vec3(dis(gen) * 2.0f - 1.0f, dis(gen) * 2.0f - 1.0f, dis(gen) * 2.0f - 1.0f));
+            model = glm::rotate(model, rotAngle, rotAxis);
+
+            float scale = minScale + dis(gen) * (maxScale - minScale);
+            model = glm::scale(model, glm::vec3(scale));
+            
+            // 0~3까지의 무작위 종류 부여
+            int type = static_cast<int>(dis(gen) * 4);
+            if (type == 4) type = 3; 
+
+            result.push_back({model, type, 0, 0, 0});
+        }
+        return result;
+    }
+
+    void loadObjModel(const std::string& path, uint32_t& outIndexCount, uint32_t& outFirstIndex, int32_t& outVertexOffset) {
+        tinyobj::attrib_t attrib; std::vector<tinyobj::shape_t> shapes; std::vector<tinyobj::material_t> materials; std::string warn, err;
+        outVertexOffset = static_cast<int32_t>(vertices.size());
+        outFirstIndex = static_cast<uint32_t>(indices.size());
+
+        if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str())) {
+            std::cerr << "OBJ 로드 실패! 대체용 미니 구체를 생성합니다. 에러: " << warn << err << "\n";
+            generateSphere(1.0f, 16, 16); 
+            outIndexCount = static_cast<uint32_t>(indices.size()) - outFirstIndex;
+            return;
+        }
+
+        // 1. 모델의 실제 크기를 재기 위한 바운딩 박스 변수
+        glm::vec3 minBoundary(FLT_MAX);
+        glm::vec3 maxBoundary(-FLT_MAX);
+
+        // 첫 번째 패스: 모델이 얼마나 거대한지 최댓값/최솟값 측정
+        for (const auto& shape : shapes) {
+            for (const auto& index : shape.mesh.indices) {
+                glm::vec3 pos = { attrib.vertices[3 * index.vertex_index + 0], attrib.vertices[3 * index.vertex_index + 1], attrib.vertices[3 * index.vertex_index + 2] };
+                minBoundary = glm::min(minBoundary, pos);
+                maxBoundary = glm::max(maxBoundary, pos);
+            }
+        }
+
+        // 중심점과 가장 긴 축의 길이 계산
+        glm::vec3 center = (maxBoundary + minBoundary) / 2.0f;
+        glm::vec3 extents = maxBoundary - minBoundary;
+        float maxExtent = std::max(extents.x, std::max(extents.y, extents.z));
+        if (maxExtent == 0.0f) maxExtent = 1.0f; // 0으로 나누기 방지
+
+        uint32_t localVertexCount = 0;
+        // 두 번째 패스: 정점을 1x1x1 크기로 깎아서 조립
+        for (const auto& shape : shapes) {
+            for (const auto& index : shape.mesh.indices) {
+                Vertex vertex{};
+                
+                // 🚀 [핵심 1] 엄청나게 큰 좌표를 중심으로 끌고 온 뒤, 최대 크기(maxExtent)로 나누어 강제로 1.0 안에 욱여넣습니다!
+                glm::vec3 rawPos = { attrib.vertices[3 * index.vertex_index + 0], attrib.vertices[3 * index.vertex_index + 1], attrib.vertices[3 * index.vertex_index + 2] };
+                vertex.pos = (rawPos - center) / (maxExtent * 0.5f);
+                
+                if (index.texcoord_index >= 0) vertex.texCoord = { attrib.texcoords[2 * index.texcoord_index + 0], 1.0f - attrib.texcoords[2 * index.texcoord_index + 1] };
+                
+                // 🚀 [핵심 2] 스캔 데이터에 빛 반사(Normal) 데이터가 없으면, 정점의 위치를 기반으로 가짜 법선을 만들어 NaN 에러(파란 괴물)를 막습니다.
+                if (index.normal_index >= 0) {
+                    vertex.normal = { attrib.normals[3 * index.normal_index + 0], attrib.normals[3 * index.normal_index + 1], attrib.normals[3 * index.normal_index + 2] };
+                } else {
+                    vertex.normal = glm::normalize(vertex.pos); 
+                }
+                
+                vertex.color = {1.0f, 1.0f, 1.0f};
+                vertices.push_back(vertex);
+                indices.push_back(localVertexCount++);
+            }
+        }
+        outIndexCount = static_cast<uint32_t>(indices.size()) - outFirstIndex;
+    }
+
+    void createComputeResources() {
+        VkDeviceSize inputSize = asteroidTransforms.size() * sizeof(AsteroidData);
+        createBuffer(inputSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, computeInputBuffer, computeInputMem);
+        void* inData; vkMapMemory(device, computeInputMem, 0, inputSize, 0, &inData);
+        memcpy(inData, asteroidTransforms.data(), inputSize);
+        vkUnmapMemory(device, computeInputMem);
+
+        VkDeviceSize outputSize = 240000 * sizeof(glm::mat4);
+        createBuffer(outputSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, computeOutputBuffer, computeOutputMem);
+
+        VkDeviceSize indirectSize = 12 * sizeof(VkDrawIndexedIndirectCommand);
+        createBuffer(indirectSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, indirectDrawBuffer, indirectDrawMem);
+        vkMapMemory(device, indirectDrawMem, 0, indirectSize, 0, &indirectDrawMapped);
+
+        for (int lod = 0; lod < 3; ++lod) {
+            for (int type = 0; type < 4; ++type) {
+                int bucket = lod * 4 + type;
+                drawCmdTemplates[bucket].instanceCount = 0;
+                drawCmdTemplates[bucket].firstInstance = bucket * 20000;
+                if (lod == 0) { drawCmdTemplates[bucket].indexCount = highLodIndexCount[type]; drawCmdTemplates[bucket].firstIndex = highLodFirstIndex[type]; drawCmdTemplates[bucket].vertexOffset = highLodVertexOffset[type]; }
+                else if (lod == 1) { drawCmdTemplates[bucket].indexCount = midLodIndexCount; drawCmdTemplates[bucket].firstIndex = midLodFirstIndex; drawCmdTemplates[bucket].vertexOffset = midLodVertexOffset; }
+                else { drawCmdTemplates[bucket].indexCount = lowLodIndexCount; drawCmdTemplates[bucket].firstIndex = lowLodFirstIndex; drawCmdTemplates[bucket].vertexOffset = lowLodVertexOffset; }
+            }
+        }
+        memcpy(indirectDrawMapped, drawCmdTemplates, indirectSize);
+
+        std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+        bindings[0].binding = 0; bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; bindings[0].descriptorCount = 1; bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings[1].binding = 1; bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bindings[1].descriptorCount = 1; bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings[2].binding = 2; bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bindings[2].descriptorCount = 1; bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings[3].binding = 3; bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bindings[3].descriptorCount = 1; bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        
+        VkDescriptorSetLayoutCreateInfo layoutInfo{}; layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layoutInfo.bindingCount = 4; layoutInfo.pBindings = bindings.data();
+        vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &computeDescriptorSetLayout);
+
+        VkDescriptorSetAllocateInfo allocInfo{}; allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; allocInfo.descriptorPool = descriptorPool; allocInfo.descriptorSetCount = 1; allocInfo.pSetLayouts = &computeDescriptorSetLayout;
+        vkAllocateDescriptorSets(device, &allocInfo, &computeDescriptorSet);
+
+        VkDescriptorBufferInfo uboInfo{uniformBuffer, 0, sizeof(UniformBufferObject)};
+        VkDescriptorBufferInfo inInfo{computeInputBuffer, 0, inputSize};
+        VkDescriptorBufferInfo outInfo{computeOutputBuffer, 0, outputSize};
+        VkDescriptorBufferInfo indInfo{indirectDrawBuffer, 0, indirectSize};
+
+        std::array<VkWriteDescriptorSet, 4> writes{};
+        for(int i=0; i<4; i++) { writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet = computeDescriptorSet; writes[i].dstBinding = i; writes[i].descriptorCount = 1; writes[i].descriptorType = (i==0) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; }
+        writes[0].pBufferInfo = &uboInfo; writes[1].pBufferInfo = &inInfo; writes[2].pBufferInfo = &outInfo; writes[3].pBufferInfo = &indInfo;
+        vkUpdateDescriptorSets(device, 4, writes.data(), 0, nullptr);
+
+        auto compCode = readFile("shaders/asteroid_cull.spv"); 
+        VkShaderModule compMod = createShaderModule(compCode);
+        VkPipelineShaderStageCreateInfo stageInfo{}; stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT; stageInfo.module = compMod; stageInfo.pName = "main";
+        
+        VkPipelineLayoutCreateInfo pLayoutInfo{}; pLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayoutInfo.setLayoutCount = 1; pLayoutInfo.pSetLayouts = &computeDescriptorSetLayout;
+        vkCreatePipelineLayout(device, &pLayoutInfo, nullptr, &computePipelineLayout);
+        
+        VkComputePipelineCreateInfo pipelineInfo{}; pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; pipelineInfo.stage = stageInfo; pipelineInfo.layout = computePipelineLayout;
+        vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
+        vkDestroyShaderModule(device, compMod, nullptr);
+    }
+    // =========================================================
+
+    bool worldToScreen(glm::vec3 worldPos, glm::mat4 view, glm::mat4 proj, float screenWidth, float screenHeight, glm::vec2& outScreenPos) {
+        glm::vec4 clipSpacePos = proj * view * glm::vec4(worldPos, 1.0f);
+        if (clipSpacePos.w < 0.1f) return false;
+
+        glm::vec3 ndcSpacePos = glm::vec3(clipSpacePos) / clipSpacePos.w;
+        outScreenPos.x = (ndcSpacePos.x + 1.0f) * 0.5f * screenWidth;
+        outScreenPos.y = (ndcSpacePos.y + 1.0f) * 0.5f * screenHeight; 
+        return true;
+    }
+
+    void TextCentered(const char* text) {
+        float windowWidth = ImGui::GetWindowSize().x;
+        float textWidth = ImGui::CalcTextSize(text).x;
+        ImGui::SetCursorPosX((windowWidth - textWidth) * 0.5f);
+        ImGui::Text("%s", text);
+    }
+
+    void initImGui() {
+        VkDescriptorPoolSize pool_sizes[] = {
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 }
+        };
+        VkDescriptorPoolCreateInfo pool_info = {};
+        pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        pool_info.maxSets = 100;
+        pool_info.poolSizeCount = (uint32_t)IM_ARRAYSIZE(pool_sizes);
+        pool_info.pPoolSizes = pool_sizes;
+        vkCreateDescriptorPool(device, &pool_info, nullptr, &imguiPool);
+
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO(); (void)io;
+        ImGui::StyleColorsDark();
+        ImGui::GetIO().IniFilename = nullptr;
+
+        ImGui_ImplGlfw_InitForVulkan(window, true);
+        ImGui_ImplVulkan_InitInfo init_info = {};
+        init_info.Instance = instance;
+        init_info.PhysicalDevice = physicalDevice;
+        init_info.Device = device;
+        init_info.QueueFamily = 0;
+        init_info.Queue = graphicsQueue;
+        init_info.PipelineCache = VK_NULL_HANDLE;
+        init_info.DescriptorPool = imguiPool;
+        init_info.Subpass = 0;
+        init_info.MinImageCount = 2;
+        init_info.ImageCount = 2;
+        init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+        init_info.RenderPass = renderPass; 
+        ImGui_ImplVulkan_Init(&init_info); 
+    }
+
+    void createShadowResources() {
+        VkFormat depthFormat = findDepthFormat(); 
+        VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = 2048; iInfo.extent.height = 2048;
+        iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1;
+        iInfo.format = depthFormat; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        iInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCreateImage(device, &iInfo, nullptr, &shadowImage);
+        
+        VkMemoryRequirements memReqs; vkGetImageMemoryRequirements(device, shadowImage, &memReqs);
+        VkMemoryAllocateInfo allocInfo{}; allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memReqs.size; allocInfo.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkAllocateMemory(device, &allocInfo, nullptr, &shadowMemory);
+        vkBindImageMemory(device, shadowImage, shadowMemory, 0);
+        
+        VkImageViewCreateInfo vInfo{}; vInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vInfo.image = shadowImage; vInfo.viewType = VK_IMAGE_VIEW_TYPE_2D; vInfo.format = depthFormat;
+        vInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        vInfo.subresourceRange.baseMipLevel = 0; vInfo.subresourceRange.levelCount = 1;
+        vInfo.subresourceRange.baseArrayLayer = 0; vInfo.subresourceRange.layerCount = 1;
+        vkCreateImageView(device, &vInfo, nullptr, &shadowView);
+        
+        VkSamplerCreateInfo sInfo{}; sInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sInfo.magFilter = VK_FILTER_LINEAR; sInfo.minFilter = VK_FILTER_LINEAR;
+        sInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; sInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; sInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        sInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; 
+        vkCreateSampler(device, &sInfo, nullptr, &shadowSampler);
+        
+        VkAttachmentDescription attachment{};
+        attachment.format = depthFormat; attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        
+        VkAttachmentReference depthRef{}; depthRef.attachment = 0; depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        
+        VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 0; subpass.pDepthStencilAttachment = &depthRef;
+        
+        std::array<VkSubpassDependency, 2> deps{};
+        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0;
+        deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT; deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        
+        VkRenderPassCreateInfo rpInfo{}; rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        rpInfo.attachmentCount = 1; rpInfo.pAttachments = &attachment; rpInfo.subpassCount = 1; rpInfo.pSubpasses = &subpass; rpInfo.dependencyCount = 2; rpInfo.pDependencies = deps.data();
+        vkCreateRenderPass(device, &rpInfo, nullptr, &shadowRenderPass);
+        
+        VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fbInfo.renderPass = shadowRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &shadowView;
+        fbInfo.width = 2048; fbInfo.height = 2048; fbInfo.layers = 1;
+        vkCreateFramebuffer(device, &fbInfo, nullptr, &shadowFramebuffer);
+    }
+
+    void createShadowPipeline() {
+        VkPushConstantRange pcRange{}; pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pcRange.offset = 0; pcRange.size = sizeof(PushConstants);
+        VkPipelineLayoutCreateInfo layInfo{}; layInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; layInfo.setLayoutCount = 1; layInfo.pSetLayouts = &descriptorSetLayout; layInfo.pushConstantRangeCount = 1; layInfo.pPushConstantRanges = &pcRange;
+        vkCreatePipelineLayout(device, &layInfo, nullptr, &shadowPipelineLayout);
+        
+        auto vertCode = readFile("shaders/shadow_vert.spv");
+        VkShaderModule vertMod = createShaderModule(vertCode);
+        VkPipelineShaderStageCreateInfo vS{}; vS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vS.stage = VK_SHADER_STAGE_VERTEX_BIT; vS.module = vertMod; vS.pName = "main";
+        
+        auto bindingDescription = Vertex::getBindingDescription();
+        auto attributeDescriptions = Vertex::getAttributeDescriptions();
+        VkPipelineVertexInputStateCreateInfo vI{}; vI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vI.vertexBindingDescriptionCount = 1; vI.pVertexBindingDescriptions = &bindingDescription;
+        vI.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size()); vI.pVertexAttributeDescriptions = attributeDescriptions.data();
+        
+        VkPipelineInputAssemblyStateCreateInfo iA{}; iA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; iA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        
+        VkViewport vp{}; vp.width = 2048.0f; vp.height = 2048.0f; vp.maxDepth = 1.0f;
+        VkRect2D sc{}; sc.extent = {2048, 2048};
+        VkPipelineViewportStateCreateInfo vpS{}; vpS.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vpS.viewportCount = 1; vpS.pViewports = &vp; vpS.scissorCount = 1; vpS.pScissors = &sc;
+        
+        VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_FRONT_BIT; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+        rs.depthBiasEnable = VK_TRUE; rs.depthBiasConstantFactor = 1.25f; rs.depthBiasSlopeFactor = 1.75f;
+        
+        VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        
+        VkPipelineDepthStencilStateCreateInfo ds{}; ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        ds.depthTestEnable = VK_TRUE; ds.depthWriteEnable = VK_TRUE; ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        
+        VkGraphicsPipelineCreateInfo pInfo{}; pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pInfo.stageCount = 1; pInfo.pStages = &vS; pInfo.pVertexInputState = &vI; pInfo.pInputAssemblyState = &iA; pInfo.pViewportState = &vpS; pInfo.pRasterizationState = &rs; pInfo.pMultisampleState = &ms; pInfo.pDepthStencilState = &ds; pInfo.layout = shadowPipelineLayout; pInfo.renderPass = shadowRenderPass;
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pInfo, nullptr, &shadowPipeline);
+        vkDestroyShaderModule(device, vertMod, nullptr);
+    }
+
+    void createOffscreenResources() {
+        VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT; VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
+        auto makeImg = [&](VkFormat fmt, VkImageUsageFlags usage, VkImage& img, VkDeviceMemory& mem, VkImageView& view, VkImageAspectFlags aspect) {
+            VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D;
+            iInfo.extent.width = swapChainExtent.width; iInfo.extent.height = swapChainExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = fmt; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = usage; iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            vkCreateImage(device, &iInfo, nullptr, &img);
+            VkMemoryRequirements mReqs; vkGetImageMemoryRequirements(device, img, &mReqs);
+            VkMemoryAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            aInfo.allocationSize = mReqs.size; aInfo.memoryTypeIndex = findMemoryType(mReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            vkAllocateMemory(device, &aInfo, nullptr, &mem); vkBindImageMemory(device, img, mem, 0);
+            VkImageViewCreateInfo vInfo{}; vInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vInfo.image = img; vInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vInfo.format = fmt; vInfo.subresourceRange.aspectMask = aspect; vInfo.subresourceRange.baseMipLevel = 0; vInfo.subresourceRange.levelCount = 1; vInfo.subresourceRange.baseArrayLayer = 0; vInfo.subresourceRange.layerCount = 1;
+            vkCreateImageView(device, &vInfo, nullptr, &view);
+        };
+        makeImg(colorFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, offscreenColorImage, offscreenColorMem, offscreenColorView, VK_IMAGE_ASPECT_COLOR_BIT);
+        makeImg(colorFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, offscreenBrightImage, offscreenBrightMem, offscreenBrightView, VK_IMAGE_ASPECT_COLOR_BIT);
+        makeImg(depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, offscreenDepthImage, offscreenDepthMem, offscreenDepthView, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+        std::array<VkAttachmentDescription, 3> atts{};
+        atts[0].format = colorFormat; atts[0].samples = VK_SAMPLE_COUNT_1_BIT; atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        atts[1] = atts[0]; 
+        atts[2].format = depthFormat; atts[2].samples = VK_SAMPLE_COUNT_1_BIT; atts[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; atts[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; atts[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[2].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference colRefs[2] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
+        VkAttachmentReference depRef{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; subpass.colorAttachmentCount = 2; subpass.pColorAttachments = colRefs; subpass.pDepthStencilAttachment = &depRef;
+
+        std::array<VkSubpassDependency, 2> deps{};
+        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0; deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT; deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL; deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        VkRenderPassCreateInfo rpInfo{}; rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpInfo.attachmentCount = 3; rpInfo.pAttachments = atts.data(); rpInfo.subpassCount = 1; rpInfo.pSubpasses = &subpass; rpInfo.dependencyCount = 2; rpInfo.pDependencies = deps.data();
+        vkCreateRenderPass(device, &rpInfo, nullptr, &offscreenRenderPass);
+
+        std::array<VkImageView, 3> fbAtts = {offscreenColorView, offscreenBrightView, offscreenDepthView};
+        VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = offscreenRenderPass; fbInfo.attachmentCount = 3; fbInfo.pAttachments = fbAtts.data(); fbInfo.width = swapChainExtent.width; fbInfo.height = swapChainExtent.height; fbInfo.layers = 1;
+        vkCreateFramebuffer(device, &fbInfo, nullptr, &offscreenFramebuffer);
+
+        VkSamplerCreateInfo sInfo{}; sInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO; sInfo.magFilter = VK_FILTER_LINEAR; sInfo.minFilter = VK_FILTER_LINEAR; sInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; sInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; sInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vkCreateSampler(device, &sInfo, nullptr, &offscreenSampler);
+    }
+
+    void createBlurResources() {
+        VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+        auto makeImg = [&](VkImage& img, VkDeviceMemory& mem, VkImageView& view) {
+            VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = swapChainExtent.width; iInfo.extent.height = swapChainExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = colorFormat; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            vkCreateImage(device, &iInfo, nullptr, &img);
+            VkMemoryRequirements mReqs; vkGetImageMemoryRequirements(device, img, &mReqs);
+            VkMemoryAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; aInfo.allocationSize = mReqs.size; aInfo.memoryTypeIndex = findMemoryType(mReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            vkAllocateMemory(device, &aInfo, nullptr, &mem); vkBindImageMemory(device, img, mem, 0);
+            VkImageViewCreateInfo vInfo{}; vInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vInfo.image = img; vInfo.viewType = VK_IMAGE_VIEW_TYPE_2D; vInfo.format = colorFormat; vInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; vInfo.subresourceRange.baseMipLevel = 0; vInfo.subresourceRange.levelCount = 1; vInfo.subresourceRange.baseArrayLayer = 0; vInfo.subresourceRange.layerCount = 1;
+            vkCreateImageView(device, &vInfo, nullptr, &view);
+        };
+
+        for(int i = 0; i < 2; i++) makeImg(blurImages[i], blurMemories[i], blurViews[i]);
+
+        VkAttachmentDescription att{}; att.format = colorFormat; att.samples = VK_SAMPLE_COUNT_1_BIT; att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE; att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; subpass.colorAttachmentCount = 1; subpass.pColorAttachments = &colorRef;
+
+        std::array<VkSubpassDependency, 2> deps{};
+        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0; deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL; deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        VkRenderPassCreateInfo rpInfo{}; rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpInfo.attachmentCount = 1; rpInfo.pAttachments = &att; rpInfo.subpassCount = 1; rpInfo.pSubpasses = &subpass; rpInfo.dependencyCount = 2; rpInfo.pDependencies = deps.data();
+        vkCreateRenderPass(device, &rpInfo, nullptr, &blurRenderPass);
+
+        for(int i = 0; i < 2; i++) {
+            VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = blurRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &blurViews[i]; fbInfo.width = swapChainExtent.width; fbInfo.height = swapChainExtent.height; fbInfo.layers = 1;
+            vkCreateFramebuffer(device, &fbInfo, nullptr, &blurFramebuffers[i]);
+        }
+    }
+
+    void createBlurPipeline() {
+        VkDescriptorSetLayoutBinding b{}; b.binding = 0; b.descriptorCount = 1; b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo layInfo{}; layInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layInfo.bindingCount = 1; layInfo.pBindings = &b;
+        vkCreateDescriptorSetLayout(device, &layInfo, nullptr, &blurDescriptorSetLayout);
+
+        VkDescriptorSetAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; aInfo.descriptorPool = descriptorPool; aInfo.descriptorSetCount = 3;
+        std::vector<VkDescriptorSetLayout> layouts(3, blurDescriptorSetLayout); aInfo.pSetLayouts = layouts.data();
+        vkAllocateDescriptorSets(device, &aInfo, blurDescriptorSets);
+
+        auto mI = [&](VkImageView v){ VkDescriptorImageInfo i{}; i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; i.imageView = v; i.sampler = offscreenSampler; return i; };
+        VkDescriptorImageInfo i0 = mI(offscreenBrightView); VkDescriptorImageInfo i1 = mI(blurViews[0]); VkDescriptorImageInfo i2 = mI(blurViews[1]);
+        std::array<VkWriteDescriptorSet, 3> wr{};
+        for(int i=0; i<3; i++) { wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = blurDescriptorSets[i]; wr[i].dstBinding = 0; wr[i].descriptorCount = 1; wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; }
+        wr[0].pImageInfo = &i0; wr[1].pImageInfo = &i1; wr[2].pImageInfo = &i2;
+        vkUpdateDescriptorSets(device, 3, wr.data(), 0, nullptr);
+
+        VkPushConstantRange pc{}; pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pc.offset = 0; pc.size = sizeof(int);
+        VkPipelineLayoutCreateInfo pLayInfo{}; pLayInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayInfo.setLayoutCount = 1; pLayInfo.pSetLayouts = &blurDescriptorSetLayout; pLayInfo.pushConstantRangeCount = 1; pLayInfo.pPushConstantRanges = &pc;
+        vkCreatePipelineLayout(device, &pLayInfo, nullptr, &blurPipelineLayout);
+
+        auto vCode = readFile("shaders/post_vert.spv"); auto fCode = readFile("shaders/blur_frag.spv");
+        VkShaderModule vMod = createShaderModule(vCode); VkShaderModule fMod = createShaderModule(fCode);
+        VkPipelineShaderStageCreateInfo vS{}; vS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vS.stage = VK_SHADER_STAGE_VERTEX_BIT; vS.module = vMod; vS.pName = "main";
+        VkPipelineShaderStageCreateInfo fS{}; fS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fS.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fS.module = fMod; fS.pName = "main";
+        VkPipelineShaderStageCreateInfo sS[] = {vS, fS};
+
+        VkPipelineVertexInputStateCreateInfo vI{}; vI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        VkPipelineInputAssemblyStateCreateInfo iA{}; iA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; iA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkViewport vp{}; vp.width = swapChainExtent.width; vp.height = swapChainExtent.height; vp.maxDepth = 1.0f; VkRect2D sc{}; sc.extent = swapChainExtent;
+        VkPipelineViewportStateCreateInfo vpS{}; vpS.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vpS.viewportCount = 1; vpS.pViewports = &vp; vpS.scissorCount = 1; vpS.pScissors = &sc;
+        VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.lineWidth = 1.0f; rs.cullMode = VK_CULL_MODE_NONE;
+        VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo ds{}; ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; ds.depthTestEnable = VK_FALSE;
+        VkPipelineColorBlendAttachmentState cbA{}; cbA.colorWriteMask = 0xF; cbA.blendEnable = VK_FALSE;
+        VkPipelineColorBlendStateCreateInfo cbS{}; cbS.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbS.attachmentCount = 1; cbS.pAttachments = &cbA;
+        
+        VkGraphicsPipelineCreateInfo pInfo{}; pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; pInfo.stageCount = 2; pInfo.pStages = sS; pInfo.pVertexInputState = &vI; pInfo.pInputAssemblyState = &iA; pInfo.pViewportState = &vpS; pInfo.pRasterizationState = &rs; pInfo.pMultisampleState = &ms; pInfo.pDepthStencilState = &ds; pInfo.pColorBlendState = &cbS; pInfo.layout = blurPipelineLayout; pInfo.renderPass = blurRenderPass;
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pInfo, nullptr, &blurPipeline);
+        vkDestroyShaderModule(device, fMod, nullptr); vkDestroyShaderModule(device, vMod, nullptr);
+    }
+
+    void createPostProcessPipeline() {
+        std::array<VkDescriptorSetLayoutBinding, 2> b{};
+        b[0].binding = 0; b[0].descriptorCount = 1; b[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        b[1].binding = 1; b[1].descriptorCount = 1; b[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo layInfo{}; layInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layInfo.bindingCount = 2; layInfo.pBindings = b.data();
+        vkCreateDescriptorSetLayout(device, &layInfo, nullptr, &postDescriptorSetLayout);
+
+        VkDescriptorSetAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; aInfo.descriptorPool = descriptorPool; aInfo.descriptorSetCount = 1; aInfo.pSetLayouts = &postDescriptorSetLayout;
+        vkAllocateDescriptorSets(device, &aInfo, &postDescriptorSet);
+
+        auto mI = [&](VkImageView v){ VkDescriptorImageInfo i{}; i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; i.imageView = v; i.sampler = offscreenSampler; return i; };
+        VkDescriptorImageInfo cI = mI(offscreenColorView); VkDescriptorImageInfo brI = mI(blurViews[1]); 
+
+        std::array<VkWriteDescriptorSet, 2> wr{};
+        wr[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[0].dstSet = postDescriptorSet; wr[0].dstBinding = 0; wr[0].descriptorCount = 1; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[0].pImageInfo = &cI;
+        wr[1] = wr[0]; wr[1].dstBinding = 1; wr[1].pImageInfo = &brI;
+        vkUpdateDescriptorSets(device, 2, wr.data(), 0, nullptr);
+
+        VkPipelineLayoutCreateInfo pLayInfo{}; pLayInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayInfo.setLayoutCount = 1; pLayInfo.pSetLayouts = &postDescriptorSetLayout;
+        vkCreatePipelineLayout(device, &pLayInfo, nullptr, &postPipelineLayout);
+
+        auto vCode = readFile("shaders/post_vert.spv"); auto fCode = readFile("shaders/post_frag.spv");
+        VkShaderModule vMod = createShaderModule(vCode); VkShaderModule fMod = createShaderModule(fCode);
+        VkPipelineShaderStageCreateInfo vS{}; vS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vS.stage = VK_SHADER_STAGE_VERTEX_BIT; vS.module = vMod; vS.pName = "main";
+        VkPipelineShaderStageCreateInfo fS{}; fS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fS.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fS.module = fMod; fS.pName = "main";
+        VkPipelineShaderStageCreateInfo sS[] = {vS, fS};
+
+        VkPipelineVertexInputStateCreateInfo vI{}; vI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        VkPipelineInputAssemblyStateCreateInfo iA{}; iA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; iA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkViewport vp{}; vp.width = swapChainExtent.width; vp.height = swapChainExtent.height; vp.maxDepth = 1.0f; VkRect2D sc{}; sc.extent = swapChainExtent;
+        VkPipelineViewportStateCreateInfo vpS{}; vpS.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vpS.viewportCount = 1; vpS.pViewports = &vp; vpS.scissorCount = 1; vpS.pScissors = &sc;
+        VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.lineWidth = 1.0f; rs.cullMode = VK_CULL_MODE_NONE;
+        VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo ds{}; ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; ds.depthTestEnable = VK_FALSE;
+        VkPipelineColorBlendAttachmentState cbA{}; cbA.colorWriteMask = 0xF; cbA.blendEnable = VK_FALSE;
+        VkPipelineColorBlendStateCreateInfo cbS{}; cbS.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbS.attachmentCount = 1; cbS.pAttachments = &cbA;
+        
+        VkGraphicsPipelineCreateInfo pInfo{}; pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; pInfo.stageCount = 2; pInfo.pStages = sS; pInfo.pVertexInputState = &vI; pInfo.pInputAssemblyState = &iA; pInfo.pViewportState = &vpS; pInfo.pRasterizationState = &rs; pInfo.pMultisampleState = &ms; pInfo.pDepthStencilState = &ds; pInfo.pColorBlendState = &cbS; pInfo.layout = postPipelineLayout; pInfo.renderPass = renderPass; 
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pInfo, nullptr, &postPipeline);
+        vkDestroyShaderModule(device, fMod, nullptr); vkDestroyShaderModule(device, vMod, nullptr);
+    }
+
+    void updateUniformBuffer() override {
+        static auto lastTimePoint = std::chrono::high_resolution_clock::now();
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        float deltaTime = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - lastTimePoint).count();
+        lastTimePoint = currentTime;
+
+        static bool spacePressedLastFrame = false;
+        bool spacePressed = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
+        if (spacePressed && !spacePressedLastFrame) isPaused = !isPaused;
+        spacePressedLastFrame = spacePressed;
+        if (!isPaused) currentAppTime += deltaTime;
+        float time = currentAppTime; 
+
+        sun.currentModelMat = glm::rotate(glm::mat4(1.0f), glm::radians(sun.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f)) * glm::rotate(glm::mat4(1.0f), time * glm::radians(sun.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(sun.radius));
+        sun.currentPosition = glm::vec3(0.0f);
+
+        static float simulationTime = 0.0f;
+        static bool isSimInit = false;
+        if (!isSimInit) { simulationTime = time * 0.5f; isSimInit = true; } // 첫 프레임 동기화
+
+        if (isRealScaleMode) scaleLerp += deltaTime * 0.5f; 
+        else scaleLerp -= deltaTime * 0.5f; 
+        scaleLerp = std::clamp(scaleLerp, 0.0f, 1.0f);
+        
+        // 자연스럽게 출발하고 도착하는 Smoothstep 곡선 공식 적용
+        float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp);
+
+        // 체험 버튼(isEclipseEvent)이 눌리지 않았을 때만 시간이 흐릅니다!
+        if (!isEclipseEvent && !isPaused) {
+            simulationTime += deltaTime * 0.5f; 
+        }
+        
+        float slowTime = simulationTime;
+
+        // 🚀 1. 태양(Sun) 크기 믹스 적용
+        float curSunRadius = glm::mix(sun.radius, sun.realRadius, easeScale);
+        sun.currentModelMat = glm::rotate(glm::mat4(1.0f), glm::radians(sun.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f)) 
+                            * glm::rotate(glm::mat4(1.0f), glm::radians(sun.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f)) 
+                            * glm::rotate(glm::mat4(1.0f), time * glm::radians(sun.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f)) 
+                            * glm::scale(glm::mat4(1.0f), glm::vec3(curSunRadius));
+        sun.currentPosition = glm::vec3(0.0f);
+
+        // 🚀 2. 행성 및 위성 크기/거리 믹스 적용
+        for (int i = 0; i < planets.size(); i++) {
+            auto &planet = planets[i];
+            
+            // 기존 고정값(orbitRadius, radius) 대신 믹스된 현재 값을 사용합니다!
+            float curOrbit = glm::mix(planet.orbitRadius, planet.realOrbit, easeScale);
+            float curRadius = glm::mix(planet.radius, planet.realRadius, easeScale);
+
+            float a = curOrbit; float e = planet.eccentricity; float b = a * sqrt(1.0f - e * e); float c = a * e; 
+            
+            // 1. 공전
+            float angle = glm::radians(planet.initialAngle) + slowTime * glm::radians(planet.orbitSpeed);
+            glm::vec3 localPos = glm::vec3(a * cos(angle) - c, 0.0f, b * sin(angle));
+
+            glm::mat4 orbitTilt = glm::rotate(glm::mat4(1.0f), glm::radians(planet.ascendingNode), glm::vec3(0.0f, 1.0f, 0.0f))
+                                * glm::rotate(glm::mat4(1.0f), glm::radians(planet.orbitalInclination), glm::vec3(0.0f, 0.0f, 1.0f))
+                                * glm::rotate(glm::mat4(1.0f), glm::radians(planet.periapsisAngle), glm::vec3(0.0f, 1.0f, 0.0f));
+            
+            glm::vec3 parentPos = glm::vec3(0.0f);
+            if (planet.parentIndex != -1) {
+                parentPos = planets[planet.parentIndex].currentPosition;
+            }
+            
+            glm::vec3 worldPos = parentPos + glm::vec3(orbitTilt * glm::vec4(localPos, 1.0f));
+            glm::mat4 parentTrajectory = glm::translate(glm::mat4(1.0f), worldPos);
+            
+            // 2. 자전
+            glm::mat4 selfRotationMat = glm::rotate(glm::mat4(1.0f), glm::radians(planet.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
+                                      * glm::rotate(glm::mat4(1.0f), glm::radians(planet.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
+                                      * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(planet.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f));
+            
+            planet.currentModelMat = parentTrajectory * selfRotationMat * glm::scale(glm::mat4(1.0f), glm::vec3(curRadius));
+            planet.currentPosition = worldPos;
+
+            // 3. 구름
+            if (planet.hasClouds) {
+                glm::mat4 cloudSelfRot = glm::rotate(glm::mat4(1.0f), glm::radians(planet.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
+                                       * glm::rotate(glm::mat4(1.0f), glm::radians(planet.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f)) 
+                                       * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(planet.rotationSpeed + 4.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                planet.cloudModelMat = parentTrajectory * cloudSelfRot * glm::scale(glm::mat4(1.0f), glm::vec3(curRadius * 1.005f));
+            }
+
+            // 4. 달 (지구를 따라갈 때 달의 크기와 거리도 믹스 연산)
+            if (i == 2) { 
+                // 하드코딩(0.75f) 제거, 구조체의 orbitRadius 사용
+                float curMoonOrbit = glm::mix(moon.orbitRadius, moon.realOrbit, easeScale);
+                float curMoonRadius = glm::mix(moon.radius, moon.realRadius, easeScale);
+
+                float ma = curMoonOrbit, me = moon.eccentricity, mb = ma * sqrt(1.0f - me * me), mc = ma * me;
+                // 하드코딩(45.0f) 제거, 구조체의 orbitSpeed 사용
+                float mAngle = glm::radians(moon.initialAngle) + slowTime * glm::radians(moon.orbitSpeed);
+                glm::vec3 mLocal = glm::vec3(ma * cos(mAngle) - mc, 0.0f, mb * sin(mAngle));
+                
+                glm::mat4 mOrbitTilt = glm::rotate(glm::mat4(1.0f), glm::radians(moon.ascendingNode), glm::vec3(0.0f, 1.0f, 0.0f))
+                                     * glm::rotate(glm::mat4(1.0f), glm::radians(moon.orbitalInclination), glm::vec3(0.0f, 0.0f, 1.0f))
+                                     * glm::rotate(glm::mat4(1.0f), glm::radians(moon.periapsisAngle), glm::vec3(0.0f, 1.0f, 0.0f));
+
+                glm::vec3 mWorldPos = glm::vec3(mOrbitTilt * glm::vec4(mLocal, 1.0f));
+                glm::mat4 moonBase = parentTrajectory * glm::translate(glm::mat4(1.0f), mWorldPos);
+                
+                // rotationSpeed가 orbitSpeed와 동일하므로 완벽하게 앞면만 바라보며 조석 고정됨!
+                glm::mat4 moonRot = glm::rotate(glm::mat4(1.0f), glm::radians(moon.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
+                                  * glm::rotate(glm::mat4(1.0f), glm::radians(moon.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
+                                  * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(moon.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f));
+
+                moon.currentModelMat = moonBase * moonRot * glm::scale(glm::mat4(1.0f), glm::vec3(curMoonRadius));
+                moon.currentPosition = glm::vec3(moonBase[3]);
+            }
+        }
+
+        // =========================================================
+        // 카메라 추적 업데이트
+        // =========================================================
+        glm::vec3 nextTarget = camera.target;
+        float targetRadius = 1.0f;
+        
+        if (lockedTargetType == 0) { 
+            nextTarget = sun.currentPosition; 
+            targetRadius = glm::mix(sun.radius, sun.realRadius, easeScale); 
+        }
+        else if (lockedTargetType == 1 && lockedPlanetIndex != -1) { 
+            nextTarget = planets[lockedPlanetIndex].currentPosition; 
+            targetRadius = glm::mix(planets[lockedPlanetIndex].radius, planets[lockedPlanetIndex].realRadius, easeScale); 
+        }
+        else if (lockedTargetType == 2) { 
+            nextTarget = moon.currentPosition; 
+            targetRadius = glm::mix(moon.radius, moon.realRadius, easeScale); 
+        }
+        
+        static bool isFirstFrame = true;
+        if (isFirstFrame) {
+            camera.target = nextTarget;
+            camera.lastNewTarget = nextTarget;
+            camera.targetDistance = targetRadius * 6.0f;
+            camera.currentDistance = targetRadius * 6.0f;
+            isFirstFrame = false;
+        }
+
+        // 🚀 [NEW] 천체의 팽창/수축 배율을 프레임 단위로 실시간 추적하여 카메라에 완벽 동기화!
+        static float lastTargetRadius = targetRadius;
+        static int lastTargetType = lockedTargetType;
+        static int lastTargetIndex = lockedPlanetIndex;
+
+        // 타겟이 바뀌지 않았을 때만 비율을 곱해줍니다. (다른 행성을 더블클릭할 때 화면이 확 튀는 현상 방지)
+        if (lastTargetType == lockedTargetType && lastTargetIndex == lockedPlanetIndex) {
+            if (!isFirstFrame && lastTargetRadius > 0.0f && lastTargetRadius != targetRadius) {
+                float frameRatio = targetRadius / lastTargetRadius; // 이번 프레임에서 천체가 얼마나 커졌는가?
+                
+                camera.targetDistance *= frameRatio;  // 목표 줌 거리를 비율에 맞게 조절
+                camera.currentDistance *= frameRatio; // 🚀 핵심: 카메라 현재 거리도 즉시 밀려나게 해서 시점 지연(Lag) 완벽 방지
+            }
+        }
+        
+        lastTargetRadius = targetRadius;
+        lastTargetType = lockedTargetType;
+        lastTargetIndex = lockedPlanetIndex;
+
+        // 🚀 타겟이 누구냐에 따라 카메라 방어막(최소 거리)을 다르게 설정합니다.
+        if (lockedTargetType == 0) {
+            camera.minDistance = targetRadius * 2.8f; 
+        } else {
+            camera.minDistance = targetRadius * 1.2f; 
+        }
+        
+        if (camera.targetDistance < camera.minDistance) {
+            camera.targetDistance = camera.minDistance; 
+        }
+        
+        camera.smoothFollow(nextTarget, deltaTime);
+        camera.update(deltaTime);
+
+        // =========================================================
+        // 🚀 시네마틱 개기일식 (궤도 고정 & 감속 정지 연출)
+        // =========================================================
+        static float eclipseLerp = 0.0f;
+        // 1.5초 만에 카메라가 스무스하게 빨려 들어갑니다.
+        if (isEclipseEvent) eclipseLerp += deltaTime * 0.75f; 
+        else eclipseLerp -= deltaTime * 0.75f; 
+        eclipseLerp = std::clamp(eclipseLerp, 0.0f, 1.0f);
+
+        if (eclipseLerp > 0.0f) {
+            // 1. 타겟을 강제로 달(Moon)로 고정합니다. (더블클릭 효과)
+            lockedTargetType = 2; 
+            
+            glm::vec3 sunPos = sun.currentPosition;
+            glm::vec3 moonPos = moon.currentPosition;
+            
+            // 2. 카메라 -> 달 -> 태양이 일직선이 되는 완벽한 방향 벡터 계산
+            glm::vec3 dirFromMoonToSun = glm::normalize(sunPos - moonPos);
+            
+            // 3. 엔진 허용 최대 확대 거리 (달 반지름 + 0.2f 최소 여백)
+            float targetZoom = moon.radius + 0.2f; 
+            
+            // =========================================================
+            // 🚀 [핵심 수정] perfectCamPos를 perfectCamOffset으로 변경!
+            // 카메라 pos는 타겟(달)으로부터의 '상대적인 거리와 방향'만 필요하므로
+            // moonPos를 더할 필요 없이 오프셋 방향 벡터만 계산합니다.
+            // =========================================================
+            glm::vec3 perfectCamOffset = -dirFromMoonToSun * targetZoom;
+
+            // 5. 현재 카메라 상태에서 완벽한 일식 뷰 상태로 부드럽게 섞어줍니다(Lerp).
+            float ease = eclipseLerp * eclipseLerp * (3.0f - 2.0f * eclipseLerp);
+            
+            camera.target = glm::mix(camera.target, moonPos, ease);
+            
+            // 절대 좌표가 아닌 오프셋(perfectCamOffset)을 덮어씌웁니다.
+            camera.pos = glm::mix(camera.pos, perfectCamOffset, ease);
+            
+            // 줌이 뒤로 튕겨나가지 않도록 목표 거리(targetDistance)까지 완벽하게 강제 고정!
+            camera.targetDistance = glm::mix(camera.targetDistance, targetZoom, ease);
+            camera.currentDistance = glm::mix(camera.currentDistance, targetZoom, ease);
+        }
+
+        UniformBufferObject ubo{};
+        ubo.view = camera.getViewMatrix();
+        ubo.proj = glm::perspective(glm::radians(camera.fov), swapChainExtent.width / (float)swapChainExtent.height, 0.01f, 1000000.0f);
+        ubo.proj[1][1] *= -1;
+        ubo.cameraPos = camera.target + camera.pos; 
+        ubo.time = time;
+        ubo.sunPos = sun.currentPosition; ubo.sunRadius = sun.radius;
+        ubo.earthPos = planets[2].currentPosition; ubo.earthRadius = planets[2].radius;
+        ubo.moonPos = moon.currentPosition; ubo.moonRadius = moon.radius;
+
+        glm::vec3 shadowFocusPos = nextTarget;
+        if (glm::length(shadowFocusPos) < 0.1f) shadowFocusPos = planets[2].currentPosition; 
+        
+        glm::vec3 lightDir = glm::normalize(shadowFocusPos - sun.currentPosition);
+        glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+        if(abs(glm::dot(lightDir, up)) > 0.99f) up = glm::vec3(0.0f, 0.0f, 1.0f);
+        glm::mat4 lightView = glm::lookAt(sun.currentPosition, shadowFocusPos, up);
+        float orthoSize = targetRadius * 5.0f + 2.0f; 
+        if (lockedTargetType == 0) orthoSize = 30.0f;
+        
+        glm::mat4 lightProj = glm::ortho(-orthoSize, orthoSize, -orthoSize, orthoSize, 0.1f, 200.0f);
+        lightProj[1][1] *= -1;
+        ubo.lightSpaceMatrix = lightProj * lightView;
+        
+        memcpy(uniformBufferMapped, &ubo, sizeof(ubo));
+
+        memcpy(indirectDrawMapped, drawCmdTemplates, 12 * sizeof(VkDrawIndexedIndirectCommand));
+
+        ImGui_ImplVulkan_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
+
+        if (currentAppState == AppState::LOBBY) {
+            // ---------------------------------------------------------
+            // ① 대기 화면(LOBBY) 상태의 UI 연출 (기존 완벽 복구!)
+            // ---------------------------------------------------------
+            ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width * 0.5f - 200.0f, swapChainExtent.height * 0.5f - 150.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(400.0f, 250.0f), ImGuiCond_Always);
+            
+            ImGui::Begin("Main Menu", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBackground);
+            
+            ImGui::Spacing(); ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.8f, 1.0f, 1.0f)); 
+            ImGui::SetWindowFontScale(2.0f); 
+            TextCentered("VULKAN ENGINE");
+            ImGui::PopStyleColor();
+            
+            ImGui::SetWindowFontScale(1.2f);
+            TextCentered("Solar System Architecture v1.0");
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing(); ImGui::Spacing();
+
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.4f, 0.2f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.7f, 0.3f, 0.9f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.9f, 0.4f, 1.0f));
+            
+            ImGui::SetCursorPosX(125.0f); 
+            if (ImGui::Button("LAUNCH MISSION", ImVec2(150.0f, 45.0f))) {
+                currentAppState = AppState::SIMULATION; // 누르면 시뮬레이션으로 진입!
+            }
+            ImGui::PopStyleColor(3);
+
+            ImGui::Spacing(); ImGui::Spacing();
+            ImGui::SetWindowFontScale(0.9f);
+            TextCentered("Press LAUNCH to entry universe space.");
+            ImGui::End();
+        } 
+        else if (currentAppState == AppState::SIMULATION) {
+            // ---------------------------------------------------------
+            // ② 인게임 시뮬레이션(SIMULATION) 상태의 UI 연출
+            // ---------------------------------------------------------
+            ImGui::SetNextWindowPos(ImVec2(0, 0)); 
+            ImGui::SetNextWindowSize(ImVec2((float)swapChainExtent.width, (float)swapChainExtent.height));
+            
+            // 1. 기존 HUD 오버레이 (행성 이름표)
+            ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
+            ImDrawList* drawList = ImGui::GetWindowDrawList(); glm::vec2 screenPos;
+            glm::mat4 viewMat = camera.getViewMatrix();
+            glm::mat4 projMat = glm::perspective(glm::radians(camera.fov), swapChainExtent.width / (float)swapChainExtent.height, 0.01f, 1000000.0f); projMat[1][1] *= -1;
+
+            auto drawTagBox = [&](glm::vec3 pos, const std::string& text, ImU32 col, float yOffset, bool isSelected) {
+                if (worldToScreen(pos, viewMat, projMat, swapChainExtent.width, swapChainExtent.height, screenPos)) {
+                    // 🚀 [수정됨] 텍스트 크기를 정밀하게 측정하고 패딩(여백)을 부여합니다.
+                    ImVec2 textSize = ImGui::CalcTextSize(text.c_str());
+                    ImVec2 padding = ImVec2(8.0f, 4.0f); // 좌우 8px, 상하 4px 여백
+                    
+                    float w = textSize.x + padding.x * 2.0f;
+                    float h = textSize.y + padding.y * 2.0f;
+                    
+                    // 중앙 정렬: 렌더링 시작점(X)을 전체 박스 길이의 절반만큼 왼쪽으로 옮김
+                    ImVec2 pMin = ImVec2(screenPos.x - (w * 0.5f), screenPos.y - yOffset);
+                    ImVec2 pMax = ImVec2(pMin.x + w, pMin.y + h);
+                    
+                    // 🚀 [디자인] SF 레이더 스타일의 형광 초록(Neon Green) 테마 적용
+                    // 선택됨: 밝고 쨍한 형광 초록 테두리 + 짙은 초록색 반투명 배경
+                    // 미선택: 어둡고 탁한 초록 테두리 + 검은색 반투명 배경
+                    ImU32 bgCol = isSelected ? IM_COL32(10, 50, 20, 220) : IM_COL32(0, 0, 0, 150);
+                    ImU32 borderCol = isSelected ? IM_COL32(57, 255, 20, 255) : IM_COL32(30, 120, 30, 150);
+                    
+                    // 선택 시 글자색도 흰색/회색에서 밝은 형광 초록으로 오버라이드
+                    ImU32 textCol = isSelected ? IM_COL32(57, 255, 20, 255) : col;
+                    
+                    drawList->AddRectFilled(pMin, pMax, bgCol, 4.0f);
+                    drawList->AddRect(pMin, pMax, borderCol, 4.0f, 0, isSelected ? 2.0f : 1.0f);
+                    
+                    // 계산된 패딩 위치에 텍스트를 그리면 소름 돋도록 완벽한 중앙 정렬 완성!
+                    drawList->AddText(ImVec2(pMin.x + padding.x, pMin.y + padding.y), textCol, text.c_str());
+                }
+            };
+
+            drawTagBox(sun.currentPosition, "Sun", IM_COL32(255, 200, 0, 255), 35.0f, (selectedTargetType == 0));
+            for (int i = 0; i < planets.size(); i++) {
+                drawTagBox(planets[i].currentPosition, planets[i].name, IM_COL32(255, 255, 255, 200), 35.0f, (selectedTargetType == 1 && selectedPlanetIndex == i));
+            }
+            drawTagBox(moon.currentPosition, "Moon", IM_COL32(200, 200, 200, 200), 25.0f, (selectedTargetType == 2));
+            ImGui::End();
+
+            // =========================================================
+            // 2. 좌측 상단 정보 패널 (단일 클릭 시 등장)
+            // =========================================================
+            ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Information Panel", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
+            
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.2f, 0.2f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.3f, 0.3f, 0.9f));
+            if (ImGui::Button("RETURN TO MAIN MENU", ImVec2(240.0f, 30.0f))) currentAppState = AppState::LOBBY; 
+            ImGui::PopStyleColor(2);
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+            if (selectedTargetType != -1) {
+                std::string targetName = "";
+                if (selectedTargetType == 0) targetName = "Sun";
+                else if (selectedTargetType == 1) targetName = planets[selectedPlanetIndex].name;
+                else if (selectedTargetType == 2) targetName = "Moon";
+
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.8f, 1.0f), ">> TARGET : %s", targetName.c_str());
+                ImGui::Spacing();
+                ImGui::Text("%s", getCelestialInfo(targetName).c_str());
+                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+                if (selectedTargetType == 2) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.8f, 0.8f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.3f, 0.9f, 0.9f));
+                    if (ImGui::Button(isEclipseEvent ? "EXIT ECLIPSE MODE" : "EXPERIENCE TOTAL ECLIPSE", ImVec2(240.0f, 40.0f))) {
+                        isEclipseEvent = !isEclipseEvent; 
+                    }
+                    ImGui::PopStyleColor(2);
+                }
+            } else {
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Select a celestial body\nor name tag to view info.");
+            }
+            ImGui::End();
+
+            // =========================================================
+            // 3. 우측 상단 뷰포트 설정 패널 (리얼스케일 + 궤도선 완벽 복구!)
+            // =========================================================
+            ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - 260.0f, 20.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(240.0f, 120.0f), ImGuiCond_Always);
+            ImGui::Begin("Settings Panel", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
+            
+            if (isRealScaleMode) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.3f, 0.2f, 0.8f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.4f, 0.3f, 0.9f));
+                if (ImGui::Button("RETURN TO VISUAL SCALE", ImVec2(230.0f, 40.0f))) isRealScaleMode = false;
+                ImGui::PopStyleColor(2);
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 0.8f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 1.0f, 0.9f));
+                if (ImGui::Button("ENABLE REAL SCALE", ImVec2(230.0f, 40.0f))) isRealScaleMode = true;
+                ImGui::PopStyleColor(2);
+            }
+            
+            ImGui::Spacing();
+
+            if (showOrbits) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 1.0f, 0.0f, 0.7f)); 
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f)); 
+                if (ImGui::Button("ORBIT LINES : ON", ImVec2(230.0f, 40.0f))) showOrbits = false;
+                ImGui::PopStyleColor(2);
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 0.8f)); 
+                if (ImGui::Button("ORBIT LINES : OFF", ImVec2(230.0f, 40.0f))) showOrbits = true;
+                ImGui::PopStyleColor();
+            }
+            ImGui::End();
+        }
+
+        ImGui::Render();
+    }
+    void recordCommandBuffer(VkCommandBuffer cb, uint32_t imageIndex) override {
+        VkCommandBufferBeginInfo beginInfo{}; beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        vkBeginCommandBuffer(cb, &beginInfo);
+
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
+        
+        uint32_t groupCount = (static_cast<uint32_t>(asteroidTransforms.size()) + 255) / 256;
+        vkCmdDispatch(cb, groupCount, 1, 1); 
+
+        VkMemoryBarrier barrier{}; barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; 
+        barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT; 
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+        // 1. 섀도우 맵핑 패스
+        VkRenderPassBeginInfo shadowPassInfo{}; shadowPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        shadowPassInfo.renderPass = shadowRenderPass; shadowPassInfo.framebuffer = shadowFramebuffer;
+        shadowPassInfo.renderArea.offset = {0, 0}; shadowPassInfo.renderArea.extent = {2048, 2048}; 
+        VkClearValue depthClear; depthClear.depthStencil = {1.0f, 0};
+        shadowPassInfo.clearValueCount = 1; shadowPassInfo.pClearValues = &depthClear;
+
+        vkCmdBeginRenderPass(cb, &shadowPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+        
+        VkBuffer vertexBuffers[] = {vertexBuffer}; VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets); vkCmdBindIndexBuffer(cb, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        auto drawShadowObject = [&](const Planet &p, glm::mat4 mat) {
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout, 0, 1, &p.descriptorSet, 0, nullptr);
+            PushConstants pc{mat, 0};
+            vkCmdPushConstants(cb, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+            vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0); 
+        };
+        for (const auto &planet : planets) drawShadowObject(planet, planet.currentModelMat);
+        drawShadowObject(moon, moon.currentModelMat);
+
+        vkCmdEndRenderPass(cb);
+
+        VkRenderPassBeginInfo offscreenPassInfo{}; offscreenPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        offscreenPassInfo.renderPass = offscreenRenderPass; offscreenPassInfo.framebuffer = offscreenFramebuffer;
+        offscreenPassInfo.renderArea.offset = {0, 0}; offscreenPassInfo.renderArea.extent = swapChainExtent;
+
+        std::array<VkClearValue, 3> clearValues{};
+        clearValues[0].color = {{0.01f, 0.01f, 0.01f, 1.0f}}; clearValues[1].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; clearValues[2].depthStencil = {1.0f, 0};
+        offscreenPassInfo.clearValueCount = 3; offscreenPassInfo.pClearValues = clearValues.data();
+        
+        vkCmdBeginRenderPass(cb, &offscreenPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets); vkCmdBindIndexBuffer(cb, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        // 🚀 [수정됨] 소행성대와 카이퍼벨트도 리얼 스케일 팽창 적용
+        float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp); 
+        // 행성들의 평균 팽창 비율(약 200배)을 스케일에 곱해 벨트 전체를 우주 외곽으로 밀어냅니다.
+        float beltScale = glm::mix(1.0f, 200.0f, easeScale); 
+
+        glm::mat4 astRot = glm::rotate(glm::mat4(1.0f), currentAppTime * 0.05f, glm::vec3(0.0f, 1.0f, 0.0f)); 
+        astRot = glm::scale(astRot, glm::vec3(beltScale)); // 전체 입자에 스케일 적용!
+        
+        PushConstants pcAst{astRot, 8}; 
+        vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pcAst);
+
+        for (int type = 0; type < 4; ++type) {
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &asteroidTypes[type].descriptorSet, 0, nullptr);
+            for (int lod = 0; lod < 3; ++lod) {
+                int bucketIndex = lod * 4 + type;
+                VkDeviceSize offset = bucketIndex * sizeof(VkDrawIndexedIndirectCommand);
+                vkCmdDrawIndexedIndirect(cb, indirectDrawBuffer, offset, 1, sizeof(VkDrawIndexedIndirectCommand));
+            }
+        }
+
+        auto drawObject = [&](const Planet &p, glm::mat4 mat, int type) {
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &p.descriptorSet, 0, nullptr);
+            PushConstants pc{mat, type}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+            vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0); 
+        };
+
+        glm::vec3 currentCameraPos = camera.target + camera.pos;
+        float distToSun = glm::length(currentCameraPos - sun.currentPosition);
+        bool shouldRenderSun = distToSun > (sun.radius * 2.6f);
+
+        if (shouldRenderSun) {
+            drawObject(sun, sun.currentModelMat, sun.typeId); 
+        }
+
+        for (const auto &planet : planets) {
+            float distToPlanet = glm::length(currentCameraPos - planet.currentPosition);
+            if (distToPlanet > (planet.radius * 1.2f)) {
+                drawObject(planet, planet.currentModelMat, planet.typeId);
+                if (planet.hasClouds) drawObject(planet, planet.cloudModelMat, 2);
+                if (planet.name == "Saturn") {
+                    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &saturnRing.descriptorSet, 0, nullptr);
+                    PushConstants ringPush{planet.currentModelMat, 5}; 
+                    vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &ringPush);
+                    vkCmdDrawIndexed(cb, ringIndexCount, 1, sphereIndexCount, ringVertexOffset, 0);
+                }
+            }
+        }
+
+        float distToMoon = glm::length(currentCameraPos - moon.currentPosition);
+        if (distToMoon > (moon.radius * 1.2f)) {
+            drawObject(moon, moon.currentModelMat, moon.typeId);
+        }
+        
+        drawObject(sun, glm::rotate(glm::mat4(1.0f), currentAppTime * glm::radians(0.5f), glm::vec3(0.0f, 1.0f, 0.0f)), 3);
+        
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &milkyWay.descriptorSet, 0, nullptr);
+        
+        float galaxyDrop = glm::mix(-15.0f, -2000.0f, scaleLerp);
+        
+        float fadeStart = glm::mix(1500.0f, 250000.0f, scaleLerp);
+        float fadeEnd   = glm::mix(5000.0f, 900000.0f, scaleLerp); 
+        
+        float galaxyAlpha = (camera.currentDistance - fadeStart) / (fadeEnd - fadeStart);
+        galaxyAlpha = std::clamp(galaxyAlpha, 0.0f, 1.0f); 
+        galaxyAlpha = std::pow(galaxyAlpha, 3.0f); 
+        
+        // 🚀 [핵심 추가] 천문학적 고증: 은하의 중심핵(Core)을 태양계로부터 X축 방향으로 확 밀어냅니다!
+        // 우리 태양계는 은하 중심으로부터 반경의 약 60% 지점에 위치해 있습니다.
+        float galaxyOffsetX = milkyWay.radius * 0.35f; 
+
+        // 🚀 [수정됨] glm::translate의 X축 위치에 galaxyOffsetX를 넣어줍니다.
+        // 이제 태양계(0.0)는 중심핵에서 한참 떨어진 나선팔 쪽에 위치하게 됩니다.
+        glm::mat4 mwModel = glm::translate(glm::mat4(1.0f), glm::vec3(galaxyOffsetX, galaxyDrop, 0.0f)) 
+                          * glm::rotate(glm::mat4(1.0f), glm::radians(60.0f), glm::vec3(1.0f, 0.0f, 0.0f)) 
+                          * glm::rotate(glm::mat4(1.0f), currentAppTime * 0.0005f, glm::vec3(0.0f, 1.0f, 0.0f)) 
+                          * glm::scale(glm::mat4(1.0f), glm::vec3(milkyWay.radius));
+                          
+        PushConstants mwPush{mwModel, 10, galaxyAlpha}; 
+        vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &mwPush);
+        vkCmdDrawIndexed(cb, galaxyIndexCount, 1, galaxyFirstIndex, galaxyVertexOffset, 0);
+
+        // =========================================================
+        // 🚀 궤도선 렌더링 구역
+        // =========================================================
+        if (showOrbits) {
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipeline);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sun.descriptorSet, 0, nullptr);
+            for (const auto &planet : planets) {
+                float curOrbit = glm::mix(planet.orbitRadius, planet.realOrbit, scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp));
+                float a = curOrbit, e = planet.eccentricity, b = a * sqrt(1.0f - e * e), c = a * e; 
+                glm::mat4 orbitTilt = glm::rotate(glm::mat4(1.0f), glm::radians(planet.ascendingNode), glm::vec3(0.0f, 1.0f, 0.0f))
+                                    * glm::rotate(glm::mat4(1.0f), glm::radians(planet.orbitalInclination), glm::vec3(0.0f, 0.0f, 1.0f))
+                                    * glm::rotate(glm::mat4(1.0f), glm::radians(planet.periapsisAngle), glm::vec3(0.0f, 1.0f, 0.0f));
+                                    
+                glm::mat4 orbitCenter = glm::mat4(1.0f);
+                if (planet.parentIndex != -1) orbitCenter = glm::translate(glm::mat4(1.0f), planets[planet.parentIndex].currentPosition);
+                                    
+                glm::mat4 orbitModel = orbitCenter * orbitTilt * glm::translate(glm::mat4(1.0f), glm::vec3(-c, 0.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(a, 1.0f, b));
+                PushConstants orbitPush{orbitModel, 6}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &orbitPush);
+                vkCmdDrawIndexed(cb, orbitIndexCount, 1, orbitFirstIndex, orbitVertexOffset, 0);
+            }
+        
+            float curMoonOrbit = glm::mix(0.75f, moon.realOrbit, scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp));
+            float ma = curMoonOrbit, me = moon.eccentricity, mb = ma * sqrt(1.0f - me * me), mc = ma * me;
+            glm::mat4 mOrbitTilt = glm::rotate(glm::mat4(1.0f), glm::radians(moon.ascendingNode), glm::vec3(0.0f, 1.0f, 0.0f))
+                                 * glm::rotate(glm::mat4(1.0f), glm::radians(moon.orbitalInclination), glm::vec3(0.0f, 0.0f, 1.0f))
+                                 * glm::rotate(glm::mat4(1.0f), glm::radians(moon.periapsisAngle), glm::vec3(0.0f, 1.0f, 0.0f));
+                                 
+            glm::mat4 moonOrbitModel = glm::translate(glm::mat4(1.0f), planets[2].currentPosition) * mOrbitTilt * glm::translate(glm::mat4(1.0f), glm::vec3(-mc, 0.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(ma, 1.0f, mb));
+            
+            PushConstants moonOrbitPush{moonOrbitModel, 6}; 
+            vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &moonOrbitPush);
+            vkCmdDrawIndexed(cb, orbitIndexCount, 1, orbitFirstIndex, orbitVertexOffset, 0);
+        }
+
+        // =========================================================
+        // 🚀 [중요] 궤도선을 모두 그린 후, 태양을 그리기 위해 면(Triangle) 파이프라인으로 완벽 복구
+        // =========================================================
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+
+        // 3. 거대한 태양 홍염 (Type 7) - 가까우면 숨김
+        if (shouldRenderSun) {
+            // 🚀 [수정됨] 태양 홍염도 리얼 스케일에 맞춰 거대하게 팽창합니다.
+            float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp); 
+            float curSunRadius = glm::mix(sun.radius, sun.realRadius, easeScale);
+            
+            glm::mat4 haloModel = glm::translate(glm::mat4(1.0f), sun.currentPosition) * glm::scale(glm::mat4(1.0f), glm::vec3(curSunRadius * 2.5f));
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sun.descriptorSet, 0, nullptr);
+            PushConstants haloPush{haloModel, 7}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &haloPush);
+            vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0);
+        }
+
+        vkCmdEndRenderPass(cb);
+
+        bool horizontal = true; int blurAmount = 6; 
+        for (int i = 0; i < blurAmount; i++) {
+            VkRenderPassBeginInfo blurPassInfo{}; blurPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; blurPassInfo.renderPass = blurRenderPass;
+            blurPassInfo.framebuffer = blurFramebuffers[horizontal ? 0 : 1]; blurPassInfo.renderArea.offset = {0, 0}; blurPassInfo.renderArea.extent = swapChainExtent;
+            VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}}; blurPassInfo.clearValueCount = 1; blurPassInfo.pClearValues = &clearColor;
+            vkCmdBeginRenderPass(cb, &blurPassInfo, VK_SUBPASS_CONTENTS_INLINE); vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline);
+            int setIndex = (i == 0) ? 0 : (horizontal ? 2 : 1);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipelineLayout, 0, 1, &blurDescriptorSets[setIndex], 0, nullptr);
+            int horizInt = horizontal ? 1 : 0; vkCmdPushConstants(cb, blurPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(int), &horizInt);
+            vkCmdDraw(cb, 3, 1, 0, 0); vkCmdEndRenderPass(cb); horizontal = !horizontal; 
+        }
+
+        VkRenderPassBeginInfo renderPassInfo{}; renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; renderPassInfo.renderPass = renderPass; renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
+        renderPassInfo.renderArea.offset = {0, 0}; renderPassInfo.renderArea.extent = swapChainExtent;
+        std::array<VkClearValue, 2> swapClear{}; swapClear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; swapClear[1].depthStencil = {1.0f, 0};
+        renderPassInfo.clearValueCount = 2; renderPassInfo.pClearValues = swapClear.data();
+        
+        vkCmdBeginRenderPass(cb, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipeline);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipelineLayout, 0, 1, &postDescriptorSet, 0, nullptr);
+        vkCmdDraw(cb, 3, 1, 0, 0); 
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cb);
+        vkCmdEndRenderPass(cb);
+        vkEndCommandBuffer(cb);
+    }
+
+    void cleanupApp() override {
+        ImGui_ImplVulkan_Shutdown(); ImGui_ImplGlfw_Shutdown(); ImGui::DestroyContext(); vkDestroyDescriptorPool(device, imguiPool, nullptr);
+        
+        // [NEW] SSBO 버퍼 반환 
+        vkDestroyPipeline(device, computePipeline, nullptr);
+        vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(device, computeDescriptorSetLayout, nullptr);
+        vkDestroyBuffer(device, computeInputBuffer, nullptr); vkFreeMemory(device, computeInputMem, nullptr);
+        vkDestroyBuffer(device, computeOutputBuffer, nullptr); vkFreeMemory(device, computeOutputMem, nullptr);
+        vkDestroyBuffer(device, indirectDrawBuffer, nullptr); vkFreeMemory(device, indirectDrawMem, nullptr);
+
+        vkDestroySampler(device, shadowSampler, nullptr); vkDestroyImageView(device, shadowView, nullptr);
+        vkDestroyImage(device, shadowImage, nullptr); vkFreeMemory(device, shadowMemory, nullptr);
+        vkDestroyPipeline(device, shadowPipeline, nullptr); vkDestroyPipelineLayout(device, shadowPipelineLayout, nullptr);
+        vkDestroyFramebuffer(device, shadowFramebuffer, nullptr); vkDestroyRenderPass(device, shadowRenderPass, nullptr);
+
+        vkDestroySampler(device, textureSampler, nullptr);
+        for (auto view : allViews) vkDestroyImageView(device, view, nullptr);
+        for (auto img : allImages) vkDestroyImage(device, img, nullptr);
+        for (auto mem : allMemories) vkFreeMemory(device, mem, nullptr);
+
+        vkDestroyPipeline(device, blurPipeline, nullptr); vkDestroyPipelineLayout(device, blurPipelineLayout, nullptr); vkDestroyDescriptorSetLayout(device, blurDescriptorSetLayout, nullptr); vkDestroyRenderPass(device, blurRenderPass, nullptr);
+        for(int i=0; i<2; i++) { vkDestroyFramebuffer(device, blurFramebuffers[i], nullptr); vkDestroyImageView(device, blurViews[i], nullptr); vkDestroyImage(device, blurImages[i], nullptr); vkFreeMemory(device, blurMemories[i], nullptr); }
+        
+        vkDestroyPipeline(device, postPipeline, nullptr); vkDestroyPipelineLayout(device, postPipelineLayout, nullptr); vkDestroyDescriptorSetLayout(device, postDescriptorSetLayout, nullptr); vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr); vkDestroyRenderPass(device, offscreenRenderPass, nullptr); vkDestroySampler(device, offscreenSampler, nullptr);
+        vkDestroyImageView(device, offscreenColorView, nullptr); vkDestroyImage(device, offscreenColorImage, nullptr); vkFreeMemory(device, offscreenColorMem, nullptr);
+        vkDestroyImageView(device, offscreenBrightView, nullptr); vkDestroyImage(device, offscreenBrightImage, nullptr); vkFreeMemory(device, offscreenBrightMem, nullptr);
+        vkDestroyImageView(device, offscreenDepthView, nullptr); vkDestroyImage(device, offscreenDepthImage, nullptr); vkFreeMemory(device, offscreenDepthMem, nullptr);
+
+        vkDestroyImageView(device, viewSkybox, nullptr); vkDestroyImage(device, texSkybox, nullptr); vkFreeMemory(device, memSkybox, nullptr);
+        vkDestroyImageView(device, viewDummyBlack, nullptr); vkDestroyImage(device, texDummyBlack, nullptr); vkFreeMemory(device, memDummyBlack, nullptr);
+        vkDestroyImageView(device, viewDummyFlatNormal, nullptr); vkDestroyImage(device, texDummyFlatNormal, nullptr); vkFreeMemory(device, memDummyFlatNormal, nullptr);
+        vkDestroyBuffer(device, indexBuffer, nullptr); vkFreeMemory(device, indexBufferMemory, nullptr);
+        vkDestroyBuffer(device, vertexBuffer, nullptr); vkFreeMemory(device, vertexBufferMemory, nullptr);
+        vkDestroyBuffer(device, uniformBuffer, nullptr); vkFreeMemory(device, uniformBufferMemory, nullptr);
+        vkDestroyDescriptorPool(device, descriptorPool, nullptr); vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+        vkDestroyPipeline(device, graphicsPipeline, nullptr); vkDestroyPipeline(device, linePipeline, nullptr); vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    }
+
+private:
+    void createColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a, VkImage &image, VkDeviceMemory &imageMemory, VkImageView &imageView, VkFormat format) {
+        uint8_t pixels[4] = {r, g, b, a}; VkDeviceSize imageSize = 4; VkBuffer stagingBuffer; VkDeviceMemory stagingBufferMemory;
+        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+        void *data; vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data); memcpy(data, pixels, static_cast<size_t>(imageSize)); vkUnmapMemory(device, stagingBufferMemory);
+        createImage(1, 1, format, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, image, imageMemory);
+        transitionImageLayout(image, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        copyBufferToImage(stagingBuffer, image, 1, 1);
+        transitionImageLayout(image, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
+        imageView = createImageView(image, format, VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+    VkImageView loadTexture(const std::string &path, VkFormat format) {
+        if (path.empty()) return (format == VK_FORMAT_R8G8B8A8_UNORM) ? viewDummyFlatNormal : viewDummyBlack;
+        VkImage img; VkDeviceMemory mem; VkImageView view; int texWidth, texHeight, texChannels;
+        stbi_uc *pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        if (!pixels) { std::cerr << "텍스처 없음, 더미 사용: " << path << "\n"; return viewDummyBlack; }
+        VkDeviceSize imageSize = texWidth * texHeight * 4; VkBuffer stagingBuffer; VkDeviceMemory stagingBufferMemory;
+        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+        void *data; vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data); memcpy(data, pixels, static_cast<size_t>(imageSize)); vkUnmapMemory(device, stagingBufferMemory);
+        stbi_image_free(pixels);
+        createImage(texWidth, texHeight, format, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, img, mem);
+        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        copyBufferToImage(stagingBuffer, img, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
+        view = createImageView(img, format, VK_IMAGE_ASPECT_COLOR_BIT);
+        allImages.push_back(img); allMemories.push_back(mem); allViews.push_back(view); return view;
+    }
+
+    Planet createPlanet(std::string name, int typeId, float radius, float orbitRadius, float orbitSpeed, float eccentricity, float rotSpeed, float axialTilt, float orbIncl, float periAngle, float ascNode, float initAngle, float axisDir, bool hasClouds, std::string diffuse, std::string night, std::string spec, std::string normal, std::string clouds) {
+        Planet p; p.name = name; p.typeId = typeId; p.radius = radius; p.orbitRadius = orbitRadius; p.orbitSpeed = orbitSpeed; p.eccentricity = eccentricity; p.rotationSpeed = rotSpeed; p.axialTilt = axialTilt; p.hasClouds = hasClouds;
+        
+        // 새로 추가된 5대 요소 맵핑
+        p.orbitalInclination = orbIncl; p.periapsisAngle = periAngle; p.ascendingNode = ascNode; p.initialAngle = initAngle; p.axisDirection = axisDir;
+
+        p.viewDiffuse = loadTexture(diffuse, VK_FORMAT_R8G8B8A8_SRGB); p.viewNight = loadTexture(night, VK_FORMAT_R8G8B8A8_SRGB); p.viewSpecular = loadTexture(spec, VK_FORMAT_R8G8B8A8_UNORM); p.viewNormal = loadTexture(normal, VK_FORMAT_R8G8B8A8_UNORM); p.viewClouds = loadTexture(clouds, VK_FORMAT_R8G8B8A8_SRGB);
+        VkDescriptorSetAllocateInfo allocInfo{}; allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; allocInfo.descriptorPool = descriptorPool; allocInfo.descriptorSetCount = 1; allocInfo.pSetLayouts = &descriptorSetLayout;
+        vkAllocateDescriptorSets(device, &allocInfo, &p.descriptorSet);
+        
+        VkDescriptorBufferInfo bInfo{}; bInfo.buffer = uniformBuffer; bInfo.offset = 0; bInfo.range = sizeof(UniformBufferObject);
+        auto mkImgInfo = [&](VkImageView v) { VkDescriptorImageInfo i{}; i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; i.imageView = v; i.sampler = textureSampler; return i; };
+        
+        VkDescriptorImageInfo iDiff = mkImgInfo(p.viewDiffuse), iNight = mkImgInfo(p.viewNight), iSpec = mkImgInfo(p.viewSpecular), iNorm = mkImgInfo(p.viewNormal), iCloud = mkImgInfo(p.viewClouds), iSky = mkImgInfo(viewSkybox);
+        VkDescriptorImageInfo iShadow{}; iShadow.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; iShadow.imageView = shadowView; iShadow.sampler = shadowSampler;
+
+        VkDescriptorBufferInfo ssboInfo{}; ssboInfo.buffer = computeOutputBuffer; ssboInfo.offset = 0; ssboInfo.range = VK_WHOLE_SIZE;
+
+        std::array<VkWriteDescriptorSet, 9> writes{}; 
+        for (int i = 0; i < 9; i++) { writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet = p.descriptorSet; writes[i].dstBinding = i; writes[i].descriptorCount = 1; }
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; writes[0].pBufferInfo = &bInfo;
+        for (int i = 1; i < 8; i++) writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo = &iDiff; writes[2].pImageInfo = &iNight; writes[3].pImageInfo = &iSpec; writes[4].pImageInfo = &iNorm; writes[5].pImageInfo = &iCloud; writes[6].pImageInfo = &iSky; writes[7].pImageInfo = &iShadow;
+        writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[8].pBufferInfo = &ssboInfo;
+
+        vkUpdateDescriptorSets(device, 9, writes.data(), 0, nullptr); return p;
+    }
+
+    void createDescriptorSetLayout() {
+        std::array<VkDescriptorSetLayoutBinding, 9> b{}; // [NEW] 바인딩 슬롯 9개로 확장
+        for (int i = 0; i < 9; i++) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; }
+        b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; b[0].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
+        for (int i = 1; i < 8; i++) b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b[4].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
+        
+        // [NEW] 8번 바인딩: 버텍스 셰이더에서 사용하는 대용량 데이터 버퍼(SSBO)
+        b[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; 
+        b[8].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{}; layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layoutInfo.bindingCount = 9; layoutInfo.pBindings = b.data();
+        vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
+    }
+
+    void createDescriptorPool() {
+        std::array<VkDescriptorPoolSize, 3> poolSizes{};
+        // 천체가 늘어날 것에 대비해 내부 슬롯 용량도 빵빵하게 늘려줍니다.
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; poolSizes[0].descriptorCount = 100; 
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; poolSizes[1].descriptorCount = 500; 
+        poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; poolSizes[2].descriptorCount = 100;
+
+        VkDescriptorPoolCreateInfo poolInfo{}; 
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; 
+        poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size()); 
+        poolInfo.pPoolSizes = poolSizes.data(); 
+        
+        // 🚀 [핵심 해결] 최대 세트 개수를 20개에서 100개로 대폭 확장합니다!
+        poolInfo.maxSets = 100; 
+        
+        vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool);
+    }
+
+    void generateSphere(float radius, int sectorCount, int stackCount) {
+        float x, y, z, xy; float sectorStep = 2 * M_PI / sectorCount; float stackStep = M_PI / stackCount; float sectorAngle, stackAngle;
+        for (int i = 0; i <= stackCount; ++i) {
+            stackAngle = M_PI / 2 - i * stackStep; 
+            xy = radius * cosf(stackAngle); 
+            // 🚀 [수정] 위아래 높이를 Z가 아니라 'Y축'으로 잡아줍니다!
+            y = radius * sinf(stackAngle); 
+            
+            for (int j = 0; j <= sectorCount; ++j) {
+                sectorAngle = j * sectorStep; 
+                x = xy * cosf(sectorAngle); 
+                // 🚀 [수정] 둥근 적도 평면을 Y가 아니라 'Z축'으로 잡아줍니다!
+                z = xy * sinf(sectorAngle); 
+                
+                vertices.push_back({glm::vec3(x, y, z), glm::vec3(1.0f), glm::vec2((float)j / sectorCount, (float)i / stackCount), glm::normalize(glm::vec3(x, y, z))});
+            }
+        }
+        for (int i = 0; i < stackCount; ++i) {
+            int k1 = i * (sectorCount + 1); int k2 = k1 + sectorCount + 1;
+            for (int j = 0; j < sectorCount; ++j, ++k1, ++k2) {
+                if (i != 0) { indices.push_back(k1); indices.push_back(k2); indices.push_back(k1 + 1); }
+                if (i != (stackCount - 1)) { indices.push_back(k1 + 1); indices.push_back(k2); indices.push_back(k2 + 1); }
+            }
+        }
+    }
+    void generateRing(float innerRadius, float outerRadius, int sectorCount) {
+        for (int i = 0; i <= sectorCount; ++i) {
+            float angle = (float)i / sectorCount * 2.0f * M_PI; float cosA = cosf(angle); float sinA = sinf(angle);
+            vertices.push_back({glm::vec3(innerRadius * cosA, 0.0f, innerRadius * sinA), glm::vec3(1.0f), glm::vec2(0.0f, (float)i / sectorCount), glm::vec3(0, 1, 0)});
+            vertices.push_back({glm::vec3(outerRadius * cosA, 0.0f, outerRadius * sinA), glm::vec3(1.0f), glm::vec2(1.0f, (float)i / sectorCount), glm::vec3(0, 1, 0)});
+        }
+        for (int i = 0; i < sectorCount; ++i) {
+            int k1 = i * 2; int k2 = k1 + 1; int k3 = (i + 1) * 2; int k4 = k3 + 1;
+            indices.push_back(k1); indices.push_back(k3); indices.push_back(k2); indices.push_back(k2); indices.push_back(k3); indices.push_back(k4);
+        }
+    }
+    void generateOrbit(int segmentCount) {
+        for (int i = 0; i <= segmentCount; ++i) {
+            float angle = (float)i / segmentCount * 2.0f * M_PI;
+            // 🚀 빛 번짐(Bloom) 폭주 방지: 형광 노란색의 채도는 유지하되 밝기를 0.2, 0.4 수준으로 낮춥니다.
+            vertices.push_back({glm::vec3(cosf(angle), 0.0f, sinf(angle)), glm::vec3(0.2f, 0.4f, 0.0f), glm::vec2(0.0f), glm::vec3(0, 1, 0)});
+            indices.push_back(i);
+        }
+    }
+    void generateGalaxyDisk(float radius, int sectorCount) {
+        vertices.push_back({glm::vec3(0.0f), glm::vec3(1.0f), glm::vec2(0.5f, 0.5f), glm::vec3(0, 1, 0)}); // 중심점
+        for (int i = 0; i <= sectorCount; ++i) {
+            float angle = (float)i / sectorCount * 2.0f * M_PI;
+            float u = 0.5f + 0.5f * cosf(angle); float v = 0.5f + 0.5f * sinf(angle);
+            vertices.push_back({glm::vec3(radius * cosf(angle), 0.0f, radius * sinf(angle)), glm::vec3(1.0f), glm::vec2(u, v), glm::vec3(0, 1, 0)});
+        }
+        for (int i = 1; i <= sectorCount; ++i) {
+            indices.push_back(0); indices.push_back(i); indices.push_back(i + 1);
+        }
+    }
+    void createCubeTextureImage() {
+        // 🚀 확장자를 .exr로 설정합니다! (textures 폴더 안에 6장의 EXR 파일이 있어야 합니다)
+        std::vector<std::string> cubeFaces = {
+            "textures/right.exr", "textures/left.exr", 
+            "textures/top.exr", "textures/bottom.exr", 
+            "textures/front.exr", "textures/back.exr"
+        };
+        
+        int texWidth = 0, texHeight = 0; 
+        
+        // 🚀 8비트 정수가 아닌 32비트 실수(float) 포인터 배열 사용
+        float *pixels[6]; 
+        const char* err = nullptr;
+
+        for (int i = 0; i < 6; i++) { 
+            int width, height;
+            // 🚀 tinyexr 라이브러리를 사용하여 EXR 파일 로드
+            int ret = LoadEXR(&pixels[i], &width, &height, cubeFaces[i].c_str(), &err);
+            
+            if (ret != TINYEXR_SUCCESS) {
+                if (err) {
+                    std::string errorMsg = err;
+                    FreeEXRErrorMessage(err); // 에러 메시지 메모리 누수 방지
+                    throw std::runtime_error("EXR 로드 실패: " + cubeFaces[i] + " - " + errorMsg);
+                }
+                throw std::runtime_error("EXR 로드 실패: " + cubeFaces[i]);
+            }
+            
+            // 6면의 해상도가 같아야 하므로 첫 번째 파일의 해상도를 기준으로 삼음
+            if (i == 0) {
+                texWidth = width;
+                texHeight = height;
+            }
+        }
+        
+        // 🚀 1픽셀당 4바이트(8비트)에서 16바이트(32비트 float * 4채널)로 용량 4배 확장
+        VkDeviceSize layerSize = static_cast<VkDeviceSize>(texWidth) * static_cast<VkDeviceSize>(texHeight) * 4ull * sizeof(float); 
+        VkDeviceSize imageSize = layerSize * 6; 
+        
+        VkBuffer stagingBuffer; VkDeviceMemory stagingBufferMemory;
+        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+        void *data; 
+        vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+        
+        for (int i = 0; i < 6; i++) { 
+            memcpy(static_cast<char *>(data) + (layerSize * i), pixels[i], static_cast<size_t>(layerSize)); 
+            // 🚀 tinyexr은 내부적으로 malloc을 쓰기 때문에 반드시 free()로 메모리를 해제해야 합니다.
+            free(pixels[i]); 
+        }
+        vkUnmapMemory(device, stagingBufferMemory);
+        
+        // 🚀 [핵심] Vulkan 이미지 포맷을 실수형(SFLOAT)으로 변경하여 빛의 다이나믹 레인지를 보존합니다.
+        VkFormat hdrFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
+        
+        VkImageCreateInfo imageInfo{}; imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; imageInfo.imageType = VK_IMAGE_TYPE_2D; imageInfo.extent.width = texWidth; imageInfo.extent.height = texHeight; imageInfo.extent.depth = 1; imageInfo.mipLevels = 1; imageInfo.arrayLayers = 6; 
+        imageInfo.format = hdrFormat; // 새로운 HDR 포맷 적용
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL; imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; imageInfo.samples = VK_SAMPLE_COUNT_1_BIT; imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCreateImage(device, &imageInfo, nullptr, &texSkybox);
+        
+        VkMemoryRequirements memReqs; vkGetImageMemoryRequirements(device, texSkybox, &memReqs); 
+        VkMemoryAllocateInfo allocInfo{}; allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; allocInfo.allocationSize = memReqs.size; allocInfo.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkAllocateMemory(device, &allocInfo, nullptr, &memSkybox); vkBindImageMemory(device, texSkybox, memSkybox, 0);
+        
+        transitionImageLayout(texSkybox, hdrFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 6);
+        
+        VkCommandBuffer cb = beginSingleTimeCommands();
+        std::vector<VkBufferImageCopy> bufferCopyRegions;
+        for (uint32_t face = 0; face < 6; face++) { 
+            VkBufferImageCopy region{}; region.bufferOffset = layerSize * face; region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; region.imageSubresource.mipLevel = 0; region.imageSubresource.baseArrayLayer = face; region.imageSubresource.layerCount = 1; region.imageExtent = {(uint32_t)texWidth, (uint32_t)texHeight, 1}; 
+            bufferCopyRegions.push_back(region); 
+        }
+        vkCmdCopyBufferToImage(cb, stagingBuffer, texSkybox, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, bufferCopyRegions.size(), bufferCopyRegions.data());
+        endSingleTimeCommands(cb);
+        
+        transitionImageLayout(texSkybox, hdrFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 6);
+        
+        vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
+        
+        viewSkybox = createImageView(texSkybox, hdrFormat, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_CUBE, 6);
+    }
+    void createGraphicsPipeline() {
+        auto vertShaderCode = readFile("shaders/vert.spv"); auto fragShaderCode = readFile("shaders/frag.spv");
+        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode); VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+        VkPipelineShaderStageCreateInfo vertShaderStageInfo{}; vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT; vertShaderStageInfo.module = vertShaderModule; vertShaderStageInfo.pName = "main";
+        VkPipelineShaderStageCreateInfo fragShaderStageInfo{}; fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fragShaderStageInfo.module = fragShaderModule; fragShaderStageInfo.pName = "main";
+        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+        auto bindingDescription = Vertex::getBindingDescription(); auto attributeDescriptions = Vertex::getAttributeDescriptions();
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{}; vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO; vertexInputInfo.vertexBindingDescriptionCount = 1; vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size()); vertexInputInfo.pVertexBindingDescriptions = &bindingDescription; vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{}; inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkViewport viewport{}; viewport.width = (float)swapChainExtent.width; viewport.height = (float)swapChainExtent.height; viewport.maxDepth = 1.0f; VkRect2D scissor{}; scissor.extent = swapChainExtent;
+        VkPipelineViewportStateCreateInfo viewportState{}; viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; viewportState.viewportCount = 1; viewportState.pViewports = &viewport; viewportState.scissorCount = 1; viewportState.pScissors = &scissor;
+        VkPipelineRasterizationStateCreateInfo rasterizer{}; rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rasterizer.polygonMode = VK_POLYGON_MODE_FILL; rasterizer.lineWidth = 1.0f; rasterizer.cullMode = VK_CULL_MODE_NONE; rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        VkPipelineMultisampleStateCreateInfo multisampling{}; multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo depthStencil{}; depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; depthStencil.depthTestEnable = VK_TRUE; depthStencil.depthWriteEnable = VK_TRUE; depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        
+        VkPipelineColorBlendAttachmentState colorBlendAttachment[2]{};
+        colorBlendAttachment[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT; colorBlendAttachment[0].blendEnable = VK_TRUE; colorBlendAttachment[0].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; colorBlendAttachment[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; colorBlendAttachment[0].colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment[1] = colorBlendAttachment[0]; 
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{}; colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; colorBlending.attachmentCount = 2; colorBlending.pAttachments = colorBlendAttachment;
+
+        VkPushConstantRange pushConstantRange{}; pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pushConstantRange.offset = 0; pushConstantRange.size = sizeof(PushConstants);
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{}; pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pipelineLayoutInfo.setLayoutCount = 1; pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout; pipelineLayoutInfo.pushConstantRangeCount = 1; pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+        vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
+        
+        VkGraphicsPipelineCreateInfo pipelineInfo{}; pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; pipelineInfo.stageCount = 2; pipelineInfo.pStages = shaderStages; pipelineInfo.pVertexInputState = &vertexInputInfo; pipelineInfo.pInputAssemblyState = &inputAssembly; pipelineInfo.pViewportState = &viewportState; pipelineInfo.pRasterizationState = &rasterizer; pipelineInfo.pMultisampleState = &multisampling; pipelineInfo.pDepthStencilState = &depthStencil; pipelineInfo.pColorBlendState = &colorBlending; pipelineInfo.layout = pipelineLayout; pipelineInfo.renderPass = offscreenRenderPass;
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline);
+
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &linePipeline);
+
+        vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr);
+    }
+
+    void createVertexBuffer() {
+        VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+        createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, vertexBuffer, vertexBufferMemory);
+        void *data;
+        vkMapMemory(device, vertexBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, vertices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, vertexBufferMemory);
+    }
+
+    void createIndexBuffer() {
+        VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
+        createBuffer(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, indexBuffer, indexBufferMemory);
+        void *data;
+        vkMapMemory(device, indexBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, indices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, indexBufferMemory);
+    }
+
+    void createUniformBuffer() { VkDeviceSize bufferSize = sizeof(UniformBufferObject); createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffer, uniformBufferMemory); vkMapMemory(device, uniformBufferMemory, 0, bufferSize, 0, &uniformBufferMapped); }
+    void createTextureSampler() { VkSamplerCreateInfo samplerInfo{}; samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO; samplerInfo.magFilter = VK_FILTER_LINEAR; samplerInfo.minFilter = VK_FILTER_LINEAR; samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.anisotropyEnable = VK_FALSE; samplerInfo.compareEnable = VK_FALSE; samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR; vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler); }
+};
+
+#ifdef _WIN32
+#pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
+#endif
+
+int main() {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+    SolarSystemApp app;
+    try { 
+        app.run(); 
+    } catch (const std::exception &e) { 
+        // 🚀 [핵심 해결] CMD 창이 없어도, 크래시가 나면 윈도우 에러 창을 띄워서 원인을 알려줍니다!
+#ifdef _WIN32
+        MessageBoxA(nullptr, e.what(), "Vulkan Engine Fatal Error", MB_OK | MB_ICONERROR);
+#else
+        std::cerr << e.what() << std::endl; 
+#endif
+        return EXIT_FAILURE; 
+    }
+    return EXIT_SUCCESS;
+}

@@ -1,0 +1,13 @@
+# 빌드 폴더 및 결과물
+/build/
+*.exe
+*.obj
+*.spv
+*.pdb
+*.ilk
+
+# IDE 설정 파일
+.vs/
+.vscode/
+.idea/
+*.suo
