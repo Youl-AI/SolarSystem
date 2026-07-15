@@ -98,6 +98,10 @@ protected:
     virtual void onMouseMove(double x, double y) {}
     virtual void onMouseScroll(double xoffset, double yoffset) {}
 
+    // [가상 함수] 매 프레임 시작 시(glfwPollEvents 직후, drawFrame 이전) 호출되는 훅.
+    // 스왑체인 재생성처럼 프레임 경계 밖에서만 안전한 작업을 여기서 처리한다.
+    virtual void onFrameStart() {}
+
     static void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods)
     {
         auto app = reinterpret_cast<VulkanBase *>(glfwGetWindowUserPointer(window));
@@ -146,6 +150,7 @@ protected:
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
+            onFrameStart();
             drawFrame();
         }
         vkDeviceWaitIdle(device);
@@ -397,7 +402,9 @@ protected:
         createInfo.surface = surface;
         createInfo.minImageCount = 2;
         swapChainImageFormat = VK_FORMAT_B8G8R8A8_SRGB;
-        swapChainExtent = {WIDTH, HEIGHT};
+        int fbWidth, fbHeight;
+        glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
+        swapChainExtent = {static_cast<uint32_t>(fbWidth), static_cast<uint32_t>(fbHeight)};
         createInfo.imageFormat = swapChainImageFormat;
         createInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
         createInfo.imageExtent = swapChainExtent;
@@ -512,21 +519,28 @@ protected:
         vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore);
         vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence);
     }
+    void cleanupSwapChain()
+    {
+        for (auto fb : swapChainFramebuffers)
+            vkDestroyFramebuffer(device, fb, nullptr);
+        swapChainFramebuffers.clear();
+        vkDestroyImageView(device, depthImageView, nullptr);
+        vkDestroyImage(device, depthImage, nullptr);
+        vkFreeMemory(device, depthImageMemory, nullptr);
+        for (auto iv : swapChainImageViews)
+            vkDestroyImageView(device, iv, nullptr);
+        swapChainImageViews.clear();
+        vkDestroySwapchainKHR(device, swapChain, nullptr);
+    }
+
     void cleanupCore()
     {
         vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
         vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
         vkDestroyFence(device, inFlightFence, nullptr);
         vkDestroyCommandPool(device, commandPool, nullptr);
-        vkDestroyImageView(device, depthImageView, nullptr);
-        vkDestroyImage(device, depthImage, nullptr);
-        vkFreeMemory(device, depthImageMemory, nullptr);
-        for (auto fb : swapChainFramebuffers)
-            vkDestroyFramebuffer(device, fb, nullptr);
+        cleanupSwapChain();
         vkDestroyRenderPass(device, renderPass, nullptr);
-        for (auto iv : swapChainImageViews)
-            vkDestroyImageView(device, iv, nullptr);
-        vkDestroySwapchainKHR(device, swapChain, nullptr);
         vkDestroyDevice(device, nullptr);
         vkDestroySurfaceKHR(instance, surface, nullptr);
         vkDestroyInstance(instance, nullptr);
