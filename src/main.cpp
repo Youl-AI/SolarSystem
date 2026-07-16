@@ -340,6 +340,33 @@ protected:
         }
     }
 
+    void recreateSwapChain() {
+        vkDeviceWaitIdle(device);
+
+        for (int i = 0; i < 2; i++) {
+            vkDestroyFramebuffer(device, blurFramebuffers[i], nullptr);
+            vkDestroyImageView(device, blurViews[i], nullptr);
+            vkDestroyImage(device, blurImages[i], nullptr);
+            vkFreeMemory(device, blurMemories[i], nullptr);
+        }
+        vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr);
+        vkDestroyImageView(device, offscreenColorView, nullptr); vkDestroyImage(device, offscreenColorImage, nullptr); vkFreeMemory(device, offscreenColorMem, nullptr);
+        vkDestroyImageView(device, offscreenBrightView, nullptr); vkDestroyImage(device, offscreenBrightImage, nullptr); vkFreeMemory(device, offscreenBrightMem, nullptr);
+        vkDestroyImageView(device, offscreenDepthView, nullptr); vkDestroyImage(device, offscreenDepthImage, nullptr); vkFreeMemory(device, offscreenDepthMem, nullptr);
+
+        cleanupSwapChain();
+
+        createSwapChain();
+        createImageViews();
+        createDepthResources();
+        createFramebuffers();
+
+        createOffscreenImages();
+        createBlurImages();
+        updateBlurDescriptorSets();
+        updatePostDescriptorSets();
+    }
+
     void initApp() override {
         generateSphere(1.0f, 64, 64);
         sphereIndexCount = static_cast<uint32_t>(indices.size());
