@@ -1287,6 +1287,26 @@ protected:
 
         ImGui_ImplVulkan_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
 
+        // =========================================================
+        // 0. 우측 상단 전체화면 토글 패널 (LOBBY/SIMULATION 공통 표시)
+        // =========================================================
+        ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - 260.0f, 20.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(240.0f, 70.0f), ImGuiCond_Always);
+        ImGui::Begin("Fullscreen Panel", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
+
+        if (isFullscreen) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.3f, 0.2f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.4f, 0.3f, 0.9f));
+            if (ImGui::Button("EXIT FULLSCREEN", ImVec2(230.0f, 40.0f))) fullscreenToggleRequested = true;
+            ImGui::PopStyleColor(2);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 1.0f, 0.9f));
+            if (ImGui::Button("ENTER FULLSCREEN", ImVec2(230.0f, 40.0f))) fullscreenToggleRequested = true;
+            ImGui::PopStyleColor(2);
+        }
+        ImGui::End();
+
         if (currentAppState == AppState::LOBBY) {
             // ---------------------------------------------------------
             // ① 대기 화면(LOBBY) 상태의 UI 연출 (기존 완벽 복구!)
@@ -1410,7 +1430,7 @@ protected:
             // =========================================================
             // 3. 우측 상단 뷰포트 설정 패널 (리얼스케일 + 궤도선 완벽 복구!)
             // =========================================================
-            ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - 260.0f, 20.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - 260.0f, 100.0f), ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(240.0f, 120.0f), ImGuiCond_Always);
             ImGui::Begin("Settings Panel", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
             
