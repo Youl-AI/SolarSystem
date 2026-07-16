@@ -89,6 +89,9 @@ private:
     bool showOrbits = false; // 디폴트는 OFF
     float scaleLerp = 0.0f;  // 0.0(시각 비율) ~ 1.0(리얼 비율) 사이를 스르륵 오가는 타이머
 
+    bool isFullscreen = false;
+    bool fullscreenToggleRequested = false;
+
     VkDescriptorSetLayout descriptorSetLayout;
     VkPipelineLayout pipelineLayout;
     VkPipeline graphicsPipeline;
@@ -223,6 +226,29 @@ private:
     bool isEclipseEvent = false;
 
 protected:
+    void onFrameStart() override {
+        if (!fullscreenToggleRequested) return;
+        fullscreenToggleRequested = false;
+
+        vkDeviceWaitIdle(device);
+
+        GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+
+        if (!isFullscreen) {
+            glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
+            glfwSetWindowMonitor(window, nullptr, 0, 0, mode->width, mode->height, mode->refreshRate);
+        } else {
+            int xpos = (mode->width - static_cast<int>(WIDTH)) / 2;
+            int ypos = (mode->height - static_cast<int>(HEIGHT)) / 2;
+            glfwSetWindowMonitor(window, nullptr, xpos, ypos, static_cast<int>(WIDTH), static_cast<int>(HEIGHT), 0);
+            glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
+        }
+        isFullscreen = !isFullscreen;
+
+        recreateSwapChain();
+    }
+
     void onMouseButton(int button, int action, int mods) override {
         ImGuiIO& io = ImGui::GetIO();
         if (io.WantCaptureMouse) return;
