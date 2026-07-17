@@ -19,6 +19,9 @@
 
 #include <chrono>
 #include <vector>
+#include <algorithm>
+#include <fstream>
+#include <string>
 
 #include "imgui.h"
 #include "backends/imgui_impl_glfw.h"
@@ -49,8 +52,27 @@ struct UniformBufferObject {
     float earthRadius;
     alignas(16) glm::vec3 moonPos;
     float moonRadius;
-    alignas(16) glm::mat4 lightSpaceMatrix; 
+    alignas(16) glm::mat4 lightSpaceMatrix;
 };
+
+struct GraphicsSettings {
+    int   resolutionIndex = 2;   // index into kResolutions; 2 = 1920x1080
+    float renderScale     = 1.0f;
+    int   msaaLevel       = 8;   // 0=off, else 2/4/8; clamped to device support
+    bool  vsync           = true;
+    float fovDegrees      = 45.0f;
+    float exposure        = 1.0f;
+    int   frameCap        = 0;   // 0 = unlimited
+    bool  showFps         = false;
+    bool  fullscreen      = false;
+    bool  orbitLines      = false;
+    bool  realScale       = false;
+};
+
+static const int kResolutions[][2] = {
+    {1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}
+};
+static const int RESOLUTION_COUNT = 5;
 
 struct Planet {
     std::string name; int typeId;
@@ -86,6 +108,7 @@ private:
     std::vector<uint32_t> indices;
 
     bool isRealScaleMode = false;
+    GraphicsSettings settings;
     bool showOrbits = false; // 디폴트는 OFF
     float scaleLerp = 0.0f;  // 0.0(시각 비율) ~ 1.0(리얼 비율) 사이를 스르륵 오가는 타이머
 
@@ -429,8 +452,60 @@ protected:
         return chosen;
     }
 
+    // 설정의 MSAA 레벨(0/2/4/8)을 기기 지원으로 클램프해 VkSampleCountFlagBits로 변환한다.
+    VkSampleCountFlagBits clampMsaaLevel(int level) {
+        VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(physicalDevice, &props);
+        VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
+        auto ok = [&](VkSampleCountFlagBits b){ return (counts & b) != 0; };
+        if (level >= 8 && ok(VK_SAMPLE_COUNT_8_BIT)) return VK_SAMPLE_COUNT_8_BIT;
+        if (level >= 4 && ok(VK_SAMPLE_COUNT_4_BIT)) return VK_SAMPLE_COUNT_4_BIT;
+        if (level >= 2 && ok(VK_SAMPLE_COUNT_2_BIT)) return VK_SAMPLE_COUNT_2_BIT;
+        return VK_SAMPLE_COUNT_1_BIT;
+    }
+
+    void loadSettings() {
+        std::ifstream f("settings.ini");
+        if (!f.is_open()) return; // 파일 없으면 구조체 기본값 유지
+        std::string line;
+        while (std::getline(f, line)) {
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+            try {
+                if      (k == "resolutionIndex") settings.resolutionIndex = std::clamp(std::stoi(v), 0, RESOLUTION_COUNT - 1);
+                else if (k == "renderScale")     settings.renderScale = std::clamp(std::stof(v), 0.5f, 2.0f);
+                else if (k == "msaaLevel")       settings.msaaLevel = std::stoi(v);
+                else if (k == "vsync")           settings.vsync = (std::stoi(v) != 0);
+                else if (k == "fovDegrees")      settings.fovDegrees = std::clamp(std::stof(v), 30.0f, 90.0f);
+                else if (k == "exposure")        settings.exposure = std::clamp(std::stof(v), 0.3f, 3.0f);
+                else if (k == "frameCap")        settings.frameCap = std::max(0, std::stoi(v));
+                else if (k == "showFps")         settings.showFps = (std::stoi(v) != 0);
+                else if (k == "fullscreen")      settings.fullscreen = (std::stoi(v) != 0);
+                else if (k == "orbitLines")      settings.orbitLines = (std::stoi(v) != 0);
+                else if (k == "realScale")       settings.realScale = (std::stoi(v) != 0);
+            } catch (...) { /* 잘못된 값은 무시하고 기본값 유지 */ }
+        }
+    }
+
+    void saveSettings() {
+        std::ofstream f("settings.ini", std::ios::trunc);
+        if (!f.is_open()) return; // 저장 실패는 조용히 무시
+        f << "resolutionIndex=" << settings.resolutionIndex << "\n"
+          << "renderScale="     << settings.renderScale     << "\n"
+          << "msaaLevel="       << settings.msaaLevel       << "\n"
+          << "vsync="           << (settings.vsync ? 1 : 0) << "\n"
+          << "fovDegrees="      << settings.fovDegrees      << "\n"
+          << "exposure="        << settings.exposure        << "\n"
+          << "frameCap="        << settings.frameCap        << "\n"
+          << "showFps="         << (settings.showFps ? 1 : 0) << "\n"
+          << "fullscreen="      << (settings.fullscreen ? 1 : 0) << "\n"
+          << "orbitLines="      << (settings.orbitLines ? 1 : 0) << "\n"
+          << "realScale="       << (settings.realScale ? 1 : 0) << "\n";
+    }
+
     void initApp() override {
-        msaaSamples = pickMsaaSamples();
+        loadSettings();
+        msaaSamples = clampMsaaLevel(settings.msaaLevel);
 
         generateSphere(1.0f, 64, 64);
         sphereIndexCount = static_cast<uint32_t>(indices.size());
