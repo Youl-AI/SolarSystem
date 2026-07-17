@@ -114,6 +114,7 @@ private:
 
     bool isFullscreen = false;
     bool fullscreenToggleRequested = false;
+    bool settingsOpen = false;
 
     VkDescriptorSetLayout descriptorSetLayout;
     VkPipelineLayout pipelineLayout;
@@ -1436,24 +1437,19 @@ protected:
         ImGui_ImplVulkan_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
 
         // =========================================================
-        // 0. 우측 상단 전체화면 토글 패널 (LOBBY/SIMULATION 공통 표시)
+        // 0. 우측 상단 설정(기어) 버튼 (LOBBY/SIMULATION 공통) + 설정 창
         // =========================================================
-        ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - 260.0f, 20.0f), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(240.0f, 70.0f), ImGuiCond_Always);
-        ImGui::Begin("Fullscreen Panel", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
-
-        if (isFullscreen) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.3f, 0.2f, 0.8f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.4f, 0.3f, 0.9f));
-            if (ImGui::Button("EXIT FULLSCREEN", ImVec2(230.0f, 40.0f))) fullscreenToggleRequested = true;
-            ImGui::PopStyleColor(2);
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 0.8f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 1.0f, 0.9f));
-            if (ImGui::Button("ENTER FULLSCREEN", ImVec2(230.0f, 40.0f))) fullscreenToggleRequested = true;
-            ImGui::PopStyleColor(2);
-        }
+        ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - 80.0f, 20.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(60.0f, 60.0f), ImGuiCond_Always);
+        ImGui::Begin("Gear", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.3f, 0.4f, 0.7f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.7f, 0.9f));
+        if (ImGui::Button("[=]", ImVec2(50.0f, 40.0f))) settingsOpen = !settingsOpen; // 기어 대용 라벨
+        ImGui::PopStyleColor(2);
         ImGui::End();
+
+        applyLiveSettings();            // settings -> 기존 상태 동기화 (창이 닫혀 있어도 매 프레임)
+        if (settingsOpen) drawSettingsWindow();
 
         if (currentAppState == AppState::LOBBY) {
             // ---------------------------------------------------------
@@ -1574,43 +1570,71 @@ protected:
                 ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Select a celestial body\nor name tag to view info.");
             }
             ImGui::End();
-
-            // =========================================================
-            // 3. 우측 상단 뷰포트 설정 패널 (리얼스케일 + 궤도선 완벽 복구!)
-            // =========================================================
-            ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - 260.0f, 100.0f), ImGuiCond_Always);
-            ImGui::SetNextWindowSize(ImVec2(240.0f, 120.0f), ImGuiCond_Always);
-            ImGui::Begin("Settings Panel", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
-            
-            if (isRealScaleMode) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.3f, 0.2f, 0.8f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.4f, 0.3f, 0.9f));
-                if (ImGui::Button("RETURN TO VISUAL SCALE", ImVec2(230.0f, 40.0f))) isRealScaleMode = false;
-                ImGui::PopStyleColor(2);
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 0.8f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 1.0f, 0.9f));
-                if (ImGui::Button("ENABLE REAL SCALE", ImVec2(230.0f, 40.0f))) isRealScaleMode = true;
-                ImGui::PopStyleColor(2);
-            }
-            
-            ImGui::Spacing();
-
-            if (showOrbits) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 1.0f, 0.0f, 0.7f)); 
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f)); 
-                if (ImGui::Button("ORBIT LINES : ON", ImVec2(230.0f, 40.0f))) showOrbits = false;
-                ImGui::PopStyleColor(2);
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 0.8f)); 
-                if (ImGui::Button("ORBIT LINES : OFF", ImVec2(230.0f, 40.0f))) showOrbits = true;
-                ImGui::PopStyleColor();
-            }
-            ImGui::End();
         }
 
         ImGui::Render();
     }
+
+    void drawSettingsWindow() {
+        ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width * 0.5f - 220.0f, swapChainExtent.height * 0.5f - 240.0f), ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize(ImVec2(440.0f, 480.0f), ImGuiCond_Appearing);
+        ImGui::Begin("SETTINGS", &settingsOpen, ImGuiWindowFlags_NoCollapse);
+
+        ImGui::SeparatorText("GRAPHICS");
+
+        // Resolution / Render Scale / MSAA / VSync: 값은 여기서 고르고, 실제 적용은 Task 3-5에서
+        // pendingRecreate 경로가 담당한다. 이 태스크에서는 위젯만 배치하고 settings에 반영한다.
+        {
+            const char* resLabels[] = {"1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
+            ImGui::Combo("Resolution", &settings.resolutionIndex, resLabels, RESOLUTION_COUNT);
+
+            const char* scaleLabels[] = {"0.5x", "0.75x", "1.0x", "1.5x", "2.0x"};
+            static const float scaleVals[] = {0.5f, 0.75f, 1.0f, 1.5f, 2.0f};
+            int scaleIdx = 2; for (int i = 0; i < 5; ++i) if (scaleVals[i] == settings.renderScale) scaleIdx = i;
+            if (ImGui::Combo("Render Scale", &scaleIdx, scaleLabels, 5)) settings.renderScale = scaleVals[scaleIdx];
+
+            const char* msaaLabels[] = {"Off", "2x", "4x", "8x"};
+            static const int msaaVals[] = {0, 2, 4, 8};
+            int msaaIdx = 3; for (int i = 0; i < 4; ++i) if (msaaVals[i] == settings.msaaLevel) msaaIdx = i;
+            if (ImGui::Combo("Anti-aliasing", &msaaIdx, msaaLabels, 4)) settings.msaaLevel = msaaVals[msaaIdx];
+
+            int vsyncIdx = settings.vsync ? 0 : 1;
+            const char* vsyncLabels[] = {"On", "Off"};
+            if (ImGui::Combo("VSync", &vsyncIdx, vsyncLabels, 2)) settings.vsync = (vsyncIdx == 0);
+        }
+
+        ImGui::SliderFloat("Field of View", &settings.fovDegrees, 30.0f, 90.0f, "%.0f deg");
+        ImGui::SliderFloat("Brightness",    &settings.exposure,   0.3f, 3.0f, "%.2f");
+
+        {
+            const char* capLabels[] = {"Unlimited", "30", "60", "120", "144"};
+            static const int capVals[] = {0, 30, 60, 120, 144};
+            int capIdx = 0; for (int i = 0; i < 5; ++i) if (capVals[i] == settings.frameCap) capIdx = i;
+            if (ImGui::Combo("Frame Cap", &capIdx, capLabels, 5)) settings.frameCap = capVals[capIdx];
+        }
+        ImGui::Checkbox("Show FPS", &settings.showFps);
+        ImGui::Checkbox("Fullscreen", &settings.fullscreen);
+
+        ImGui::SeparatorText("VIEW");
+        bool inSim = (currentAppState == AppState::SIMULATION);
+        if (!inSim) ImGui::BeginDisabled();
+        ImGui::Checkbox("Orbit Lines", &settings.orbitLines);
+        ImGui::Checkbox("Real Scale", &settings.realScale);
+        if (!inSim) ImGui::EndDisabled();
+
+        ImGui::Spacing();
+        if (ImGui::Button("Close", ImVec2(120.0f, 30.0f))) { settingsOpen = false; saveSettings(); }
+
+        ImGui::End();
+    }
+
+    // settings -> 기존 파생 상태로 동기화. 설정 창이 닫혀 있어도 매 프레임 호출된다.
+    void applyLiveSettings() {
+        showOrbits      = settings.orbitLines;
+        isRealScaleMode = settings.realScale;   // scaleLerp 타이머가 이 값을 향해 전진한다(기존 로직)
+        if (settings.fullscreen != isFullscreen) fullscreenToggleRequested = true;
+    }
+
     void setFullViewport(VkCommandBuffer cb) {
         VkViewport vp{}; vp.width = (float)swapChainExtent.width; vp.height = (float)swapChainExtent.height; vp.maxDepth = 1.0f;
         VkRect2D sc{}; sc.extent = swapChainExtent;
