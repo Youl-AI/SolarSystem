@@ -404,7 +404,10 @@ protected:
         
         orbitVertexOffset = static_cast<int32_t>(vertices.size());
         orbitFirstIndex = static_cast<uint32_t>(indices.size());
-        generateOrbit(128); 
+        // 모든 궤도가 공유하는 단위 원이라 가장 빡센 궤도(리얼 스케일 Eris, 반지름 34000)에 맞춰야 한다.
+        // 다각형의 현이 진짜 타원 안쪽으로 파고드는 오차가 궤도반경 x (1 - cos(pi/N)) 이므로,
+        // 128분할이면 Eris 기준 10.2 유닛(= 그 천체 반지름의 113배)이 어긋나 궤도선이 천체를 완전히 빗나간다.
+        generateOrbit(4096);
 
         orbitIndexCount = static_cast<uint32_t>(indices.size()) - orbitFirstIndex;
 
@@ -1187,8 +1190,10 @@ protected:
         static int lastTargetType = lockedTargetType;
         static int lastTargetIndex = lockedPlanetIndex;
 
+        bool targetChanged = (lastTargetType != lockedTargetType || lastTargetIndex != lockedPlanetIndex);
+
         // 타겟이 바뀌지 않았을 때만 비율을 곱해줍니다. (다른 행성을 더블클릭할 때 화면이 확 튀는 현상 방지)
-        if (lastTargetType == lockedTargetType && lastTargetIndex == lockedPlanetIndex) {
+        if (!targetChanged) {
             if (!isFirstFrame && lastTargetRadius > 0.0f && lastTargetRadius != targetRadius) {
                 float frameRatio = targetRadius / lastTargetRadius; // 이번 프레임에서 천체가 얼마나 커졌는가?
                 
@@ -1212,7 +1217,7 @@ protected:
             camera.targetDistance = camera.minDistance; 
         }
         
-        camera.smoothFollow(nextTarget, deltaTime);
+        camera.smoothFollow(nextTarget, deltaTime, targetChanged);
         camera.update(deltaTime);
 
         // =========================================================

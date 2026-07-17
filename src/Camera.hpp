@@ -70,12 +70,21 @@ public:
         }
     }
 
-    void smoothFollow(glm::vec3 newTarget, float deltaTime)
+    // targetChanged: 다른 천체로 갈아탄 프레임인지 여부.
+    // 갈아탄 순간에 속도 피드포워드를 적용하면 두 천체의 거리만큼 타겟이 순간이동해 버리므로,
+    // 그 프레임만 피드포워드를 건너뛰고 아래 보간이 부드럽게 날아가도록 맡긴다.
+    void smoothFollow(glm::vec3 newTarget, float deltaTime, bool targetChanged = false)
     {
-        glm::vec3 targetVelocity = newTarget - lastNewTarget;
-        lastNewTarget = newTarget;
-        if (glm::length(targetVelocity) < 1.0f) target += targetVelocity; 
-        
+        if (targetChanged) {
+            lastNewTarget = newTarget;
+        } else {
+            // 공전 중인 천체의 이번 프레임 이동량을 그대로 상쇄해 카메라를 붙여 놓는다.
+            // (이게 없으면 보간만으로는 움직이는 천체를 영원히 따라잡지 못하고 속도/5 만큼 뒤처진다)
+            glm::vec3 targetVelocity = newTarget - lastNewTarget;
+            lastNewTarget = newTarget;
+            target += targetVelocity;
+        }
+
         float lerpFactor = 5.0f * deltaTime;
         target = glm::mix(target, newTarget, std::clamp(lerpFactor, 0.0f, 1.0f));
     }
