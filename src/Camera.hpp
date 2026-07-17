@@ -23,7 +23,8 @@ public:
     float currentDistance = 1.2f;
     
     float minDistance = 0.2f; 
-    float fov = 45.0f; 
+    float baseFov = 45.0f; // 설정값(줌 안 했을 때의 시야각)
+    float fov = 45.0f;     // 실제 렌더에 쓰는 값 = baseFov에서 줌으로 좁혀진 결과
 
     // 🚀 [NEW] 우주의 절대적인 위쪽은 항상 Y축으로 쾅! 고정합니다. (롤 차단)
     const glm::vec3 WORLD_UP = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -61,10 +62,10 @@ public:
                 targetDistance -= static_cast<float>(yoffset * targetDistance * 0.15f);
                 if (targetDistance < minDistance) targetDistance = minDistance;
             }
-        } else { 
-            if (fov < 45.0f) {
+        } else {
+            if (fov < baseFov) {
                 fov += 3.0f;
-                if (fov > 45.0f) fov = 45.0f;
+                if (fov > baseFov) fov = baseFov;
             } else {
                 targetDistance -= static_cast<float>(yoffset * targetDistance * 0.15f);
                 if (targetDistance > 1000000.0f) targetDistance = 1000000.0f;

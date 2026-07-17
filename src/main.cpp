@@ -18,6 +18,7 @@
 #include <random>
 
 #include <chrono>
+#include <thread>
 #include <vector>
 #include <algorithm>
 #include <fstream>
@@ -289,6 +290,16 @@ protected:
         isFullscreen = !isFullscreen;
 
         recreateSwapChain();
+    }
+
+    void throttleFrame(double frameStart) override {
+        if (settings.frameCap <= 0) return;
+        double target = 1.0 / (double)settings.frameCap;
+        double elapsed = glfwGetTime() - frameStart;
+        while (elapsed < target) { // busy-wait의 대안으로 짧게 sleep
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            elapsed = glfwGetTime() - frameStart;
+        }
     }
 
     void onMouseButton(int button, int action, int mods) override {
@@ -1147,7 +1158,8 @@ protected:
 
         updatePostDescriptorSets();
 
-        VkPipelineLayoutCreateInfo pLayInfo{}; pLayInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayInfo.setLayoutCount = 1; pLayInfo.pSetLayouts = &postDescriptorSetLayout;
+        VkPushConstantRange postPcRange{}; postPcRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; postPcRange.offset = 0; postPcRange.size = sizeof(float);
+        VkPipelineLayoutCreateInfo pLayInfo{}; pLayInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayInfo.setLayoutCount = 1; pLayInfo.pSetLayouts = &postDescriptorSetLayout; pLayInfo.pushConstantRangeCount = 1; pLayInfo.pPushConstantRanges = &postPcRange;
         vkCreatePipelineLayout(device, &pLayInfo, nullptr, &postPipelineLayout);
 
         auto vCode = readFile("shaders/post_vert.spv"); auto fCode = readFile("shaders/post_frag.spv");
@@ -1354,6 +1366,8 @@ protected:
         
         camera.smoothFollow(nextTarget, deltaTime, targetChanged);
         camera.update(deltaTime);
+        camera.baseFov = settings.fovDegrees;
+        if (camera.fov > camera.baseFov) camera.fov = camera.baseFov; // 설정을 낮추면 즉시 반영
 
         // =========================================================
         // 🚀 시네마틱 개기일식 (궤도 고정 & 감속 정지 연출)
@@ -1450,6 +1464,13 @@ protected:
 
         applyLiveSettings();            // settings -> 기존 상태 동기화 (창이 닫혀 있어도 매 프레임)
         if (settingsOpen) drawSettingsWindow();
+
+        if (settings.showFps) {
+            ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
+            ImGui::Begin("FPS", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs);
+            ImGui::Text("%.0f FPS", ImGui::GetIO().Framerate);
+            ImGui::End();
+        }
 
         if (currentAppState == AppState::LOBBY) {
             // ---------------------------------------------------------
@@ -1865,7 +1886,9 @@ protected:
         setFullViewport(cb);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipeline);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipelineLayout, 0, 1, &postDescriptorSet, 0, nullptr);
-        vkCmdDraw(cb, 3, 1, 0, 0); 
+        float postExposure = settings.exposure;
+        vkCmdPushConstants(cb, postPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float), &postExposure);
+        vkCmdDraw(cb, 3, 1, 0, 0);
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cb);
         vkCmdEndRenderPass(cb);
         vkEndCommandBuffer(cb);

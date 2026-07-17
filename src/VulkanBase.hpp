@@ -149,12 +149,17 @@ protected:
     {
         while (!glfwWindowShouldClose(window))
         {
+            double frameStart = glfwGetTime();
             glfwPollEvents();
             onFrameStart();
             drawFrame();
+            throttleFrame(frameStart);
         }
         vkDeviceWaitIdle(device);
     }
+
+    // 기본은 무제한. 앱이 프레임 상한을 걸고 싶으면 override 한다.
+    virtual void throttleFrame(double /*frameStart*/) {}
     void drawFrame()
     {
         vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
