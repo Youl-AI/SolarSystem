@@ -140,6 +140,15 @@ private:
     int32_t galaxyVertexOffset = 0;
     std::vector<Planet> planets;
 
+    // 고정된 천체의 궤도선은 매 프레임 CPU에서 double로, 카메라 상대 좌표로 다시 만든다.
+    // 공유 단위원 + 모델 행렬 방식으로는 GPU가 34000짜리 항끼리 빼면서 정밀도를 잃기 때문.
+    static constexpr int LOCKED_ORBIT_SEGMENTS = 4096;
+    VkBuffer lockedOrbitBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory lockedOrbitMemory = VK_NULL_HANDLE;
+    void* lockedOrbitMapped = nullptr;
+    bool lockedOrbitValid = false;
+    std::vector<Vertex> lockedOrbitScratch; // 매 프레임 재사용해 힙 할당을 피한다
+
     uint32_t sphereIndexCount = 0, ringIndexCount = 0, orbitIndexCount = 0, orbitFirstIndex = 0;
     int32_t ringVertexOffset = 0, orbitVertexOffset = 0;
 
@@ -453,6 +462,7 @@ protected:
         
         // 파이프라인 및 버퍼 초기화 (삭제 불가)
         createVertexBuffer(); createIndexBuffer(); createUniformBuffer();
+        createLockedOrbitBuffer();
         createDescriptorSetLayout(); createDescriptorPool();
 
         // 🚀 [수정] 반드시 풀(Pool)과 유니폼 버퍼가 생성된 "다음"에 Compute 자원을 만들어야 합니다!
@@ -1273,6 +1283,7 @@ protected:
         // 여기보다 위에서 모델 행렬을 만들면 모델은 일식 전 타겟을, 뷰 행렬은 일식 후 타겟을
         // 보게 되어 카메라 상대 좌표계에서 천체가 통째로 어긋난다.
         buildBodyModelMatrices(easeScale, slowTime, time);
+        updateLockedOrbitLine(easeScale);
 
         UniformBufferObject ubo{};
         ubo.view = camera.getViewMatrix();
@@ -1631,7 +1642,10 @@ protected:
         if (showOrbits) {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipeline);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sun.descriptorSet, 0, nullptr);
-            for (const auto &planet : planets) {
+            for (int pi = 0; pi < (int)planets.size(); ++pi) {
+                const auto &planet = planets[pi];
+                // 고정된 천체의 궤도는 아래에서 고정밀 버퍼로 따로 그린다.
+                if (lockedOrbitValid && lockedTargetType == 1 && pi == lockedPlanetIndex) continue;
                 float curOrbit = glm::mix(planet.orbitRadius, planet.realOrbit, scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp));
                 float a = curOrbit, e = planet.eccentricity, b = a * sqrt(1.0f - e * e), c = a * e; 
                 glm::mat4 orbitTilt = glm::rotate(glm::mat4(1.0f), glm::radians(planet.ascendingNode), glm::vec3(0.0f, 1.0f, 0.0f))
@@ -1645,6 +1659,16 @@ protected:
                 glm::mat4 orbitModel = orbitCenter * orbitTilt * glm::translate(glm::mat4(1.0f), glm::vec3(-c, 0.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(a, 1.0f, b));
                 PushConstants orbitPush{orbitModel, 6}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &orbitPush);
                 vkCmdDrawIndexed(cb, orbitIndexCount, 1, orbitFirstIndex, orbitVertexOffset, 0);
+            }
+
+            // 고정된 천체의 궤도선: 이미 카메라 상대 좌표로 구워져 있으므로 모델 행렬은 단위 행렬.
+            if (lockedOrbitValid) {
+                VkDeviceSize lockedOffset = 0;
+                vkCmdBindVertexBuffers(cb, 0, 1, &lockedOrbitBuffer, &lockedOffset);
+                PushConstants lockedPush{glm::mat4(1.0f), 6};
+                vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &lockedPush);
+                vkCmdDraw(cb, LOCKED_ORBIT_SEGMENTS + 1, 1, 0, 0);
+                vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets);
             }
         
             float curMoonOrbit = glm::mix(0.75f, moon.realOrbit, scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp));
@@ -1741,6 +1765,7 @@ protected:
         vkDestroyBuffer(device, indexBuffer, nullptr); vkFreeMemory(device, indexBufferMemory, nullptr);
         vkDestroyBuffer(device, vertexBuffer, nullptr); vkFreeMemory(device, vertexBufferMemory, nullptr);
         vkDestroyBuffer(device, uniformBuffer, nullptr); vkFreeMemory(device, uniformBufferMemory, nullptr);
+        vkDestroyBuffer(device, lockedOrbitBuffer, nullptr); vkFreeMemory(device, lockedOrbitMemory, nullptr);
         vkDestroyDescriptorPool(device, descriptorPool, nullptr); vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
         vkDestroyPipeline(device, graphicsPipeline, nullptr); vkDestroyPipeline(device, linePipeline, nullptr); vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     }
@@ -2005,6 +2030,46 @@ private:
         vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &linePipeline);
 
         vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr);
+    }
+
+    // 고정된 천체의 궤도를 double로 계산해 카메라 상대 좌표 정점으로 굽는다.
+    // 궤도 자체는 부모(태양 또는 모행성) 기준이므로 부모 위치를 더해 월드 좌표를 만든 뒤 상대화한다.
+    void updateLockedOrbitLine(float easeScale) {
+        lockedOrbitValid = false;
+        if (lockedTargetType != 1 || lockedPlanetIndex < 0 || lockedPlanetIndex >= (int)planets.size()) return;
+
+        const Planet& p = planets[lockedPlanetIndex];
+
+        double a = glm::mix((double)p.orbitRadius, (double)p.realOrbit, (double)easeScale);
+        double e = p.eccentricity;
+        double b = a * sqrt(1.0 - e * e);
+        double c = a * e;
+
+        glm::dmat4 tilt = glm::rotate(glm::dmat4(1.0), glm::radians((double)p.ascendingNode), glm::dvec3(0.0, 1.0, 0.0))
+                        * glm::rotate(glm::dmat4(1.0), glm::radians((double)p.orbitalInclination), glm::dvec3(0.0, 0.0, 1.0))
+                        * glm::rotate(glm::dmat4(1.0), glm::radians((double)p.periapsisAngle), glm::dvec3(0.0, 1.0, 0.0));
+
+        glm::dvec3 parentPos = glm::dvec3(0.0);
+        if (p.parentIndex != -1) parentPos = planets[p.parentIndex].currentPosition;
+
+        lockedOrbitScratch.resize(LOCKED_ORBIT_SEGMENTS + 1);
+        for (int i = 0; i <= LOCKED_ORBIT_SEGMENTS; ++i) {
+            double ang = (double)i / (double)LOCKED_ORBIT_SEGMENTS * 2.0 * M_PI;
+            glm::dvec3 local = glm::dvec3(a * cos(ang) - c, 0.0, b * sin(ang));
+            glm::dvec3 world = parentPos + glm::dvec3(tilt * glm::dvec4(local, 1.0));
+            lockedOrbitScratch[i] = {relativeToCamera(world), glm::vec3(0.2f, 0.4f, 0.0f), glm::vec2(0.0f), glm::vec3(0, 1, 0)};
+        }
+
+        memcpy(lockedOrbitMapped, lockedOrbitScratch.data(), sizeof(Vertex) * lockedOrbitScratch.size());
+        lockedOrbitValid = true;
+    }
+
+    void createLockedOrbitBuffer() {
+        VkDeviceSize bufferSize = sizeof(Vertex) * (LOCKED_ORBIT_SEGMENTS + 1);
+        createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     lockedOrbitBuffer, lockedOrbitMemory);
+        vkMapMemory(device, lockedOrbitMemory, 0, bufferSize, 0, &lockedOrbitMapped);
     }
 
     void createVertexBuffer() {
