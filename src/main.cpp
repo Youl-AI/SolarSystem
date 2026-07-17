@@ -1366,8 +1366,17 @@ protected:
         
         camera.smoothFollow(nextTarget, deltaTime, targetChanged);
         camera.update(deltaTime);
+        // FOV 설정을 바꾸면 현재 화면에 즉시 반영한다. 설정을 바꾼 순간에는 텔레스코프 줌을 취소하고
+        // 새 기본 시야각으로 스냅한다(스펙: "현재 줌 상태를 그에 맞춰 재계산"). 그 외 프레임에는
+        // 아래로만 클램프해, 사용자가 스크롤로 줌인해 둔 상태(fov < baseFov)는 유지한다.
+        static float appliedFov = -1.0f; // 첫 프레임에 로드된 FOV를 강제로 반영
         camera.baseFov = settings.fovDegrees;
-        if (camera.fov > camera.baseFov) camera.fov = camera.baseFov; // 설정을 낮추면 즉시 반영
+        if (settings.fovDegrees != appliedFov) {
+            appliedFov = settings.fovDegrees;
+            camera.fov = settings.fovDegrees;
+        } else if (camera.fov > camera.baseFov) {
+            camera.fov = camera.baseFov;
+        }
 
         // =========================================================
         // 🚀 시네마틱 개기일식 (궤도 고정 & 감속 정지 연출)
