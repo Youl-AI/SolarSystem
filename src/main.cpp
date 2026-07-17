@@ -1220,8 +1220,6 @@ protected:
         camera.smoothFollow(glm::dvec3(nextTarget), deltaTime, targetChanged);
         camera.update(deltaTime);
 
-        buildBodyModelMatrices(easeScale, slowTime, time);
-
         // =========================================================
         // 🚀 시네마틱 개기일식 (궤도 고정 & 감속 정지 연출)
         // =========================================================
@@ -1263,6 +1261,11 @@ protected:
             camera.targetDistance = glm::mix(camera.targetDistance, targetZoom, ease);
             camera.currentDistance = glm::mix(camera.currentDistance, targetZoom, ease);
         }
+
+        // 반드시 일식 블록 '뒤'여야 한다. 저 블록이 camera.target을 한 번 더 덮어쓰기 때문에,
+        // 여기보다 위에서 모델 행렬을 만들면 모델은 일식 전 타겟을, 뷰 행렬은 일식 후 타겟을
+        // 보게 되어 카메라 상대 좌표계에서 천체가 통째로 어긋난다.
+        buildBodyModelMatrices(easeScale, slowTime, time);
 
         UniformBufferObject ubo{};
         ubo.view = camera.getViewMatrix();

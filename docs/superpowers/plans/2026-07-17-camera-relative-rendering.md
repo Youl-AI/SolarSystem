@@ -499,9 +499,36 @@ Replace with:
 ```cpp
         camera.smoothFollow(glm::dvec3(nextTarget), deltaTime, targetChanged);
         camera.update(deltaTime);
-
-        buildBodyModelMatrices(easeScale, slowTime, time);
 ```
+
+Then find the end of the cinematic-eclipse block:
+
+```cpp
+            camera.currentDistance = glm::mix(camera.currentDistance, targetZoom, ease);
+        }
+
+        UniformBufferObject ubo{};
+```
+
+Replace with:
+
+```cpp
+            camera.currentDistance = glm::mix(camera.currentDistance, targetZoom, ease);
+        }
+
+        // 반드시 일식 블록 '뒤'여야 한다. 저 블록이 camera.target을 한 번 더 덮어쓰기 때문에,
+        // 여기보다 위에서 모델 행렬을 만들면 모델은 일식 전 타겟을, 뷰 행렬은 일식 후 타겟을
+        // 보게 되어 카메라 상대 좌표계에서 천체가 통째로 어긋난다.
+        buildBodyModelMatrices(easeScale, slowTime, time);
+
+        UniformBufferObject ubo{};
+```
+
+**Why not right after `camera.update()`:** the cinematic-eclipse block below it assigns
+`camera.target` again (`camera.target = glm::mix(camera.target, glm::dvec3(moonPos), ease)`), and
+`ubo.view` is built from that final value. `camera.target` is only truly final after that block.
+The eclipse block does not touch `easeScale` / `slowTime` / `time`, so this placement is a no-op
+today and correct once Task 5 makes model matrices camera-relative.
 
 - [ ] **Step 6: Fix the remaining `currentPosition` consumers**
 
