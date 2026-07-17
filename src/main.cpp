@@ -116,6 +116,9 @@ private:
     bool isFullscreen = false;
     bool fullscreenToggleRequested = false;
     bool settingsOpen = false;
+    bool pendingSwapRecreate = false;   // 해상도/VSync 변경 시
+    int  appliedResolutionIndex = 2;
+    bool appliedVsync = true;
 
     VkDescriptorSetLayout descriptorSetLayout;
     VkPipelineLayout pipelineLayout;
@@ -270,6 +273,30 @@ private:
 
 protected:
     void onFrameStart() override {
+        // VSync 변경은 present mode만 바꾸면 되므로 스왑체인 재생성으로 처리.
+        if (settings.vsync != appliedVsync) {
+            appliedVsync = settings.vsync;
+            desiredPresentMode = settings.vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_MAILBOX_KHR;
+            pendingSwapRecreate = true;
+        }
+        // 해상도 변경(창모드에서만 창 크기 변경; 전체화면 중이면 다음에 창모드로 돌아올 때 반영).
+        if (settings.resolutionIndex != appliedResolutionIndex) {
+            appliedResolutionIndex = settings.resolutionIndex;
+            if (!isFullscreen) {
+                GLFWmonitor* mon = glfwGetPrimaryMonitor(); const GLFWvidmode* vm = glfwGetVideoMode(mon);
+                int w = kResolutions[appliedResolutionIndex][0], h = kResolutions[appliedResolutionIndex][1];
+                int x = std::max(0, (vm->width - w) / 2), y = std::max(0, (vm->height - h) / 2);
+                glfwSetWindowMonitor(window, nullptr, x, y, w, h, 0);
+            }
+            pendingSwapRecreate = true;
+        }
+
+        if (pendingSwapRecreate) {
+            pendingSwapRecreate = false;
+            vkDeviceWaitIdle(device);
+            recreateSwapChain();
+        }
+
         if (!fullscreenToggleRequested) return;
         fullscreenToggleRequested = false;
 
@@ -518,6 +545,9 @@ protected:
     void initApp() override {
         loadSettings();
         msaaSamples = clampMsaaLevel(settings.msaaLevel);
+        appliedResolutionIndex = -1; // 강제로 첫 프레임에 해상도 적용
+        appliedVsync = settings.vsync;
+        desiredPresentMode = settings.vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_MAILBOX_KHR;
 
         generateSphere(1.0f, 64, 64);
         sphereIndexCount = static_cast<uint32_t>(indices.size());

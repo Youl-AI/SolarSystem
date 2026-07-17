@@ -74,6 +74,17 @@ protected:
     std::vector<VkImageView> swapChainImageViews;
     VkRenderPass renderPass;
     std::vector<VkFramebuffer> swapChainFramebuffers;
+
+    VkPresentModeKHR desiredPresentMode = VK_PRESENT_MODE_FIFO_KHR;
+
+    // 원하는 모드가 지원되면 그걸, 아니면 FIFO(항상 지원)로 폴백.
+    VkPresentModeKHR choosePresentMode(VkPresentModeKHR wanted) {
+        uint32_t n = 0; vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &n, nullptr);
+        std::vector<VkPresentModeKHR> modes(n);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &n, modes.data());
+        for (auto m : modes) if (m == wanted) return wanted;
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
     VkCommandPool commandPool;
     VkCommandBuffer commandBuffer;
     VkImage depthImage;
@@ -418,7 +429,7 @@ protected:
         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         createInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        createInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        createInfo.presentMode = choosePresentMode(desiredPresentMode);
         createInfo.clipped = VK_TRUE;
         vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain);
         uint32_t count;
