@@ -499,36 +499,9 @@ Replace with:
 ```cpp
         camera.smoothFollow(glm::dvec3(nextTarget), deltaTime, targetChanged);
         camera.update(deltaTime);
-```
 
-Then find the end of the cinematic-eclipse block:
-
-```cpp
-            camera.currentDistance = glm::mix(camera.currentDistance, targetZoom, ease);
-        }
-
-        UniformBufferObject ubo{};
-```
-
-Replace with:
-
-```cpp
-            camera.currentDistance = glm::mix(camera.currentDistance, targetZoom, ease);
-        }
-
-        // 반드시 일식 블록 '뒤'여야 한다. 저 블록이 camera.target을 한 번 더 덮어쓰기 때문에,
-        // 여기보다 위에서 모델 행렬을 만들면 모델은 일식 전 타겟을, 뷰 행렬은 일식 후 타겟을
-        // 보게 되어 카메라 상대 좌표계에서 천체가 통째로 어긋난다.
         buildBodyModelMatrices(easeScale, slowTime, time);
-
-        UniformBufferObject ubo{};
 ```
-
-**Why not right after `camera.update()`:** the cinematic-eclipse block below it assigns
-`camera.target` again (`camera.target = glm::mix(camera.target, glm::dvec3(moonPos), ease)`), and
-`ubo.view` is built from that final value. `camera.target` is only truly final after that block.
-The eclipse block does not touch `easeScale` / `slowTime` / `time`, so this placement is a no-op
-today and correct once Task 5 makes model matrices camera-relative.
 
 - [ ] **Step 6: Fix the remaining `currentPosition` consumers**
 
@@ -1082,13 +1055,104 @@ the whole renderer's coordinate frame behind one function."
 The payload. Two edits, and the precision problem is gone.
 
 **Files:**
-- Modify: `src/main.cpp` (`relativeToCamera` body)
+- Modify: `src/main.cpp` (`nextTarget` chain, `relativeToCamera` body)
 - Modify: `src/Camera.hpp` (`getViewMatrix`)
 
 **Interfaces:**
 - Consumes: `relativeToCamera()` (Task 4), `Camera::target` as `dvec3` (Task 2)
 
-- [ ] **Step 1: Make `relativeToCamera` actually subtract the camera target**
+> **Measured precision note (controller, 2026-07-17).** After the flip, the view matrix no longer
+> depends on `camera.target`, so any error *in the target itself* moves the body on screen directly.
+> `nextTarget` is currently `glm::vec3`, so each `nextTarget = <body>.currentPosition` narrows a
+> ~46000-magnitude double to float (0.0039 ULP) *before* it reaches `smoothFollow`. A harness driving
+> the real `Camera::smoothFollow` measured **4.50 px/frame** of residual jitter on Eris with
+> `nextTarget` left as `glm::vec3`, versus **0.00 px** with it kept `glm::dvec3`. Step 1 below widens
+> it. Do not skip this step — the two payload edits alone do NOT hit the < 1 px goal.
+
+- [ ] **Step 1: Keep the locked target in double all the way into `smoothFollow`**
+
+In `src/main.cpp`, find:
+
+```cpp
+        glm::vec3 nextTarget = glm::vec3(camera.target);
+        float targetRadius = 1.0f;
+        
+        if (lockedTargetType == 0) {
+            nextTarget = glm::vec3(sun.currentPosition);
+            targetRadius = glm::mix(sun.radius, sun.realRadius, easeScale); 
+        }
+        else if (lockedTargetType == 1 && lockedPlanetIndex != -1) { 
+            nextTarget = glm::vec3(planets[lockedPlanetIndex].currentPosition);
+            targetRadius = glm::mix(planets[lockedPlanetIndex].radius, planets[lockedPlanetIndex].realRadius, easeScale); 
+        }
+        else if (lockedTargetType == 2) { 
+            nextTarget = glm::vec3(moon.currentPosition);
+            targetRadius = glm::mix(moon.radius, moon.realRadius, easeScale); 
+        }
+```
+
+Replace with:
+
+```cpp
+        glm::dvec3 nextTarget = camera.target;
+        float targetRadius = 1.0f;
+        
+        if (lockedTargetType == 0) {
+            nextTarget = sun.currentPosition;
+            targetRadius = glm::mix(sun.radius, sun.realRadius, easeScale); 
+        }
+        else if (lockedTargetType == 1 && lockedPlanetIndex != -1) { 
+            nextTarget = planets[lockedPlanetIndex].currentPosition;
+            targetRadius = glm::mix(planets[lockedPlanetIndex].radius, planets[lockedPlanetIndex].realRadius, easeScale); 
+        }
+        else if (lockedTargetType == 2) { 
+            nextTarget = moon.currentPosition;
+            targetRadius = glm::mix(moon.radius, moon.realRadius, easeScale); 
+        }
+```
+
+Then find the three remaining spots that narrowed through `nextTarget` and drop the now-redundant conversions:
+
+```cpp
+            camera.target = glm::dvec3(nextTarget);
+            camera.lastNewTarget = glm::dvec3(nextTarget);
+```
+
+Replace with:
+
+```cpp
+            camera.target = nextTarget;
+            camera.lastNewTarget = nextTarget;
+```
+
+Find:
+
+```cpp
+        camera.smoothFollow(glm::dvec3(nextTarget), deltaTime, targetChanged);
+```
+
+Replace with:
+
+```cpp
+        camera.smoothFollow(nextTarget, deltaTime, targetChanged);
+```
+
+Find (added in Task 4):
+
+```cpp
+        glm::dvec3 shadowFocusWorld = glm::dvec3(nextTarget);
+```
+
+Replace with:
+
+```cpp
+        glm::dvec3 shadowFocusWorld = nextTarget;
+```
+
+(`nextTarget` is now `glm::dvec3`, so all four sites just pass it through. This is still a no-op
+until Step 2 flips the frame, because `getViewMatrix` currently narrows `target` to float anyway.)
+
+- [ ] **Step 2: Make `relativeToCamera` actually subtract the camera target**
 
 In `src/main.cpp`, find:
 
@@ -1111,7 +1175,7 @@ Replace with:
     }
 ```
 
-- [ ] **Step 2: Put the camera at the origin of the view**
+- [ ] **Step 3: Put the camera at the origin of the view**
 
 In `src/Camera.hpp`, find:
 
@@ -1139,12 +1203,12 @@ Replace with:
     }
 ```
 
-- [ ] **Step 3: Build**
+- [ ] **Step 4: Build**
 
 Run: `"$CMAKE" --build build --config Debug`
 Expected: succeeds, no errors.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/main.cpp src/Camera.hpp
@@ -1365,16 +1429,27 @@ orbit can be near the camera, so only it needs baking: 4096 verts, 180KB/frame."
 Run: `"$CMAKE" --build build --config Debug --clean-first`
 Expected: succeeds with no errors or new warnings.
 
-- [ ] **Step 2: Re-run the precision harness against the patched `Camera.hpp`**
+- [ ] **Step 2: Re-run BOTH precision harnesses against the patched `Camera.hpp`**
 
-The harness at `jitter_test.cpp` (in the session scratchpad) drives the real `Camera::smoothFollow` and reports faceting and jitter for Eris at real scale. Its `RELATIVE_F64` mode models exactly what Tasks 2-5 implement.
+Two harnesses in the session scratchpad, both driving the real `Camera::smoothFollow`:
 
-Expected, matching the design spec's targets:
+`jitter_test.cpp` reports faceting + jitter for Eris with truth defined *relative to the target*.
+Its `RELATIVE_F64` mode should report:
 ```
 camera-relative, double            0.000 %        0.00 px <-- clean
 ```
 
-Report the actual numbers. If `RELATIVE_F64` no longer reports 0.000% / 0.00 px, the implementation diverged from the design — stop and report rather than patching.
+`nexttarget_test.cpp` is the stricter one: it defines truth in *absolute screen space* (the way the
+post-flip view matrix actually works, since the view no longer depends on the target). It catches
+target-narrowing that `jitter_test.cpp` cancels out. With the Step-1 widening in place it should
+report:
+```
+glm::dvec3 (proposed amendment)          0.00 px <-- clean
+```
+and confirm the `glm::vec3` variant would have been 4.50 px — i.e. Step 1 is doing real work.
+
+Report the actual numbers from both. If either regresses from 0.00 px, the implementation diverged
+from the design — stop and report rather than patching.
 
 - [ ] **Step 3: Report what still needs a human**
 
