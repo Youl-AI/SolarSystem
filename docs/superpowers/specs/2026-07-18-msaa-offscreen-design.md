@@ -25,9 +25,14 @@ UI(ImGui)·그림자 패스는 resolve된 결과를 샘플링하므로 **전부 
 
 ## 샘플 수
 
-4x. 단, `VkPhysicalDeviceProperties.limits.framebufferColorSampleCounts &
-framebufferDepthSampleCounts`의 교집합에서 지원되는 최대 비트로 상한을 둔다. 4x 미지원 기기는 2x로
-자동 강등, 그것도 안 되면 1x(현행)로 안전하게 떨어진다. 앱 초기화 시 한 번 계산해 멤버에 저장한다.
+8x를 상한으로 둔다(초기 4x에서 상향 — 왜소행성 가장자리의 잔여 앨리어싱을 한 단계 더 줄이기 위해).
+`VkPhysicalDeviceProperties.limits.framebufferColorSampleCounts & framebufferDepthSampleCounts`의
+교집합에서 지원되는 최대 비트로 8x→4x→2x→1x 순으로 자동 강등한다. 앱 초기화 시 한 번 계산해
+멤버에 저장하고, 선택된 값을 stderr로 한 줄 기록한다(어느 레벨이 실제로 적용됐는지 확인용).
+
+**주의:** 남은 떨림은 좌표 정밀도가 아니라 래스터화 가장자리 앨리어싱이므로, MSAA는 이를 점근적으로
+줄일 뿐 완전히 0으로 만들지는 못한다(움직이는 가장자리를 유한 샘플로 표현하는 방식의 본질적 한계).
+8x가 부족하면 다음 지렛대는 수퍼샘플링(고해상도 렌더 후 축소)이며, 이는 이 설계의 범위 밖이다.
 
 ## 변경 대상 (전부 `src/main.cpp`)
 

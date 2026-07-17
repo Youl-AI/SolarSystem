@@ -413,16 +413,20 @@ protected:
         updatePostDescriptorSets();
     }
 
-    // 색상과 깊이 어태치먼트가 공통으로 지원하는 최대 샘플 수를 4x로 상한을 두고 고른다.
+    // 색상과 깊이 어태치먼트가 공통으로 지원하는 최대 샘플 수를 8x로 상한을 두고 고른다.
     // (오프스크린 패스는 두 종류를 한 서브패스에서 쓰므로 교집합이어야 한다)
+    // 8x 미지원이면 4x, 2x, 1x 순으로 자동 강등된다.
     VkSampleCountFlagBits pickMsaaSamples() {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(physicalDevice, &props);
         VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts
                                   & props.limits.framebufferDepthSampleCounts;
-        if (counts & VK_SAMPLE_COUNT_4_BIT) return VK_SAMPLE_COUNT_4_BIT;
-        if (counts & VK_SAMPLE_COUNT_2_BIT) return VK_SAMPLE_COUNT_2_BIT;
-        return VK_SAMPLE_COUNT_1_BIT;
+        VkSampleCountFlagBits chosen = VK_SAMPLE_COUNT_1_BIT;
+        if (counts & VK_SAMPLE_COUNT_8_BIT)      chosen = VK_SAMPLE_COUNT_8_BIT;
+        else if (counts & VK_SAMPLE_COUNT_4_BIT) chosen = VK_SAMPLE_COUNT_4_BIT;
+        else if (counts & VK_SAMPLE_COUNT_2_BIT) chosen = VK_SAMPLE_COUNT_2_BIT;
+        fprintf(stderr, "[MSAA] selected %dx (device supports mask 0x%x)\n", (int)chosen, (unsigned)counts);
+        return chosen;
     }
 
     void initApp() override {
