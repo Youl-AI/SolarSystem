@@ -68,7 +68,7 @@ struct Planet {
     // 🚀 [NEW] 위성 시스템을 위한 부모 행성 인덱스 (-1이면 태양을 공전)
     int parentIndex = -1; 
 
-    glm::mat4 currentModelMat; glm::vec3 currentPosition; glm::mat4 cloudModelMat;
+    glm::mat4 currentModelMat; glm::dvec3 currentPosition; glm::mat4 cloudModelMat;
     VkImageView viewDiffuse, viewNight, viewSpecular, viewNormal, viewClouds;
     VkDescriptorSet descriptorSet;
 };
@@ -310,14 +310,14 @@ protected:
         };
 
         bool tagHit = false;
-        if (check2DBoxHit(sun.currentPosition, "Sun", 0, -1, 35.0f)) tagHit = true;
+        if (check2DBoxHit(glm::vec3(sun.currentPosition), "Sun", 0, -1, 35.0f)) tagHit = true;
         if (!tagHit) {
             for (int i = 0; i < planets.size(); i++) {
-                if (check2DBoxHit(planets[i].currentPosition, planets[i].name, 1, i, 35.0f)) { tagHit = true; break; }
+                if (check2DBoxHit(glm::vec3(planets[i].currentPosition), planets[i].name, 1, i, 35.0f)) { tagHit = true; break; }
             }
         }
         if (!tagHit) {
-            if (check2DBoxHit(moon.currentPosition, "Moon", 2, -1, 25.0f)) tagHit = true;
+            if (check2DBoxHit(glm::vec3(moon.currentPosition), "Moon", 2, -1, 25.0f)) tagHit = true;
         }
 
         // 🚀 [추가 2] 2D 태그를 못 눌렀다면 기존처럼 3D 천체 본체 레이캐스팅 진행
@@ -342,12 +342,12 @@ protected:
                 }
             };
 
-            checkIntersect(sun.currentPosition, curSunRad, 0, -1);
+            checkIntersect(glm::vec3(sun.currentPosition), curSunRad, 0, -1);
             for (int i = 0; i < planets.size(); i++) {
                 float curPlanetRad = glm::mix(planets[i].radius, planets[i].realRadius, easeScale);
-                checkIntersect(planets[i].currentPosition, curPlanetRad, 1, i);
+                checkIntersect(glm::vec3(planets[i].currentPosition), curPlanetRad, 1, i);
             }
-            checkIntersect(moon.currentPosition, curMoonRad, 2, -1);
+            checkIntersect(glm::vec3(moon.currentPosition), curMoonRad, 2, -1);
         }
 
         // 🚀 [추가 3] 단일 클릭(선택 정보창 띄우기) & 더블 클릭(시점 고정) 분리 처리
@@ -1045,6 +1045,44 @@ protected:
         vkDestroyShaderModule(device, fMod, nullptr); vkDestroyShaderModule(device, vMod, nullptr);
     }
 
+    // 천체들의 위치가 확정되고 카메라까지 갱신된 뒤에 호출된다.
+    // 모델 행렬은 카메라 상대 좌표를 쓰므로 반드시 이번 프레임의 camera.target 확정 후여야 한다.
+    void buildBodyModelMatrices(float easeScale, float slowTime, float time) {
+        float curSunRadius = glm::mix(sun.radius, sun.realRadius, easeScale);
+        sun.currentModelMat = glm::translate(glm::mat4(1.0f), glm::vec3(sun.currentPosition))
+                            * glm::rotate(glm::mat4(1.0f), glm::radians(sun.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
+                            * glm::rotate(glm::mat4(1.0f), glm::radians(sun.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
+                            * glm::rotate(glm::mat4(1.0f), time * glm::radians(sun.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f))
+                            * glm::scale(glm::mat4(1.0f), glm::vec3(curSunRadius));
+
+        for (int i = 0; i < planets.size(); i++) {
+            auto &planet = planets[i];
+            float curRadius = glm::mix(planet.radius, planet.realRadius, easeScale);
+
+            glm::mat4 trajectory = glm::translate(glm::mat4(1.0f), glm::vec3(planet.currentPosition));
+
+            glm::mat4 selfRotationMat = glm::rotate(glm::mat4(1.0f), glm::radians(planet.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
+                                      * glm::rotate(glm::mat4(1.0f), glm::radians(planet.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
+                                      * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(planet.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f));
+
+            planet.currentModelMat = trajectory * selfRotationMat * glm::scale(glm::mat4(1.0f), glm::vec3(curRadius));
+
+            if (planet.hasClouds) {
+                glm::mat4 cloudSelfRot = glm::rotate(glm::mat4(1.0f), glm::radians(planet.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
+                                       * glm::rotate(glm::mat4(1.0f), glm::radians(planet.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
+                                       * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(planet.rotationSpeed + 4.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                planet.cloudModelMat = trajectory * cloudSelfRot * glm::scale(glm::mat4(1.0f), glm::vec3(curRadius * 1.005f));
+            }
+        }
+
+        float curMoonRadius = glm::mix(moon.radius, moon.realRadius, easeScale);
+        glm::mat4 moonBase = glm::translate(glm::mat4(1.0f), glm::vec3(moon.currentPosition));
+        glm::mat4 moonRot = glm::rotate(glm::mat4(1.0f), glm::radians(moon.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
+                          * glm::rotate(glm::mat4(1.0f), glm::radians(moon.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
+                          * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(moon.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f));
+        moon.currentModelMat = moonBase * moonRot * glm::scale(glm::mat4(1.0f), glm::vec3(curMoonRadius));
+    }
+
     void updateUniformBuffer() override {
         static auto lastTimePoint = std::chrono::high_resolution_clock::now();
         auto currentTime = std::chrono::high_resolution_clock::now();
@@ -1057,9 +1095,6 @@ protected:
         spacePressedLastFrame = spacePressed;
         if (!isPaused) currentAppTime += deltaTime;
         float time = currentAppTime; 
-
-        sun.currentModelMat = glm::rotate(glm::mat4(1.0f), glm::radians(sun.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f)) * glm::rotate(glm::mat4(1.0f), time * glm::radians(sun.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(sun.radius));
-        sun.currentPosition = glm::vec3(0.0f);
 
         static float simulationTime = 0.0f;
         static bool isSimInit = false;
@@ -1079,81 +1114,46 @@ protected:
         
         float slowTime = simulationTime;
 
-        // 🚀 1. 태양(Sun) 크기 믹스 적용
-        float curSunRadius = glm::mix(sun.radius, sun.realRadius, easeScale);
-        sun.currentModelMat = glm::rotate(glm::mat4(1.0f), glm::radians(sun.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f)) 
-                            * glm::rotate(glm::mat4(1.0f), glm::radians(sun.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f)) 
-                            * glm::rotate(glm::mat4(1.0f), time * glm::radians(sun.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f)) 
-                            * glm::scale(glm::mat4(1.0f), glm::vec3(curSunRadius));
-        sun.currentPosition = glm::vec3(0.0f);
+        // 🚀 1. 태양(Sun)은 월드 원점에 고정. 모델 행렬은 buildBodyModelMatrices()에서 만든다.
+        sun.currentPosition = glm::dvec3(0.0);
 
-        // 🚀 2. 행성 및 위성 크기/거리 믹스 적용
+        // 🚀 2. 행성 및 위성의 '위치'만 double로 계산한다.
+        //    모델 행렬은 카메라 업데이트가 끝난 뒤 buildBodyModelMatrices()에서 만든다.
+        //    (카메라 상대 좌표를 쓰려면 모델 행렬이 이번 프레임의 camera.target을 봐야 하기 때문)
         for (int i = 0; i < planets.size(); i++) {
             auto &planet = planets[i];
-            
-            // 기존 고정값(orbitRadius, radius) 대신 믹스된 현재 값을 사용합니다!
-            float curOrbit = glm::mix(planet.orbitRadius, planet.realOrbit, easeScale);
-            float curRadius = glm::mix(planet.radius, planet.realRadius, easeScale);
 
-            float a = curOrbit; float e = planet.eccentricity; float b = a * sqrt(1.0f - e * e); float c = a * e; 
-            
-            // 1. 공전
-            float angle = glm::radians(planet.initialAngle) + slowTime * glm::radians(planet.orbitSpeed);
-            glm::vec3 localPos = glm::vec3(a * cos(angle) - c, 0.0f, b * sin(angle));
+            double curOrbit = glm::mix((double)planet.orbitRadius, (double)planet.realOrbit, (double)easeScale);
 
-            glm::mat4 orbitTilt = glm::rotate(glm::mat4(1.0f), glm::radians(planet.ascendingNode), glm::vec3(0.0f, 1.0f, 0.0f))
-                                * glm::rotate(glm::mat4(1.0f), glm::radians(planet.orbitalInclination), glm::vec3(0.0f, 0.0f, 1.0f))
-                                * glm::rotate(glm::mat4(1.0f), glm::radians(planet.periapsisAngle), glm::vec3(0.0f, 1.0f, 0.0f));
-            
-            glm::vec3 parentPos = glm::vec3(0.0f);
+            double a = curOrbit; double e = planet.eccentricity; double b = a * sqrt(1.0 - e * e); double c = a * e;
+
+            double angle = glm::radians((double)planet.initialAngle) + (double)slowTime * glm::radians((double)planet.orbitSpeed);
+            glm::dvec3 localPos = glm::dvec3(a * cos(angle) - c, 0.0, b * sin(angle));
+
+            glm::dmat4 orbitTilt = glm::rotate(glm::dmat4(1.0), glm::radians((double)planet.ascendingNode), glm::dvec3(0.0, 1.0, 0.0))
+                                 * glm::rotate(glm::dmat4(1.0), glm::radians((double)planet.orbitalInclination), glm::dvec3(0.0, 0.0, 1.0))
+                                 * glm::rotate(glm::dmat4(1.0), glm::radians((double)planet.periapsisAngle), glm::dvec3(0.0, 1.0, 0.0));
+
+            glm::dvec3 parentPos = glm::dvec3(0.0);
             if (planet.parentIndex != -1) {
                 parentPos = planets[planet.parentIndex].currentPosition;
             }
-            
-            glm::vec3 worldPos = parentPos + glm::vec3(orbitTilt * glm::vec4(localPos, 1.0f));
-            glm::mat4 parentTrajectory = glm::translate(glm::mat4(1.0f), worldPos);
-            
-            // 2. 자전
-            glm::mat4 selfRotationMat = glm::rotate(glm::mat4(1.0f), glm::radians(planet.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
-                                      * glm::rotate(glm::mat4(1.0f), glm::radians(planet.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
-                                      * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(planet.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f));
-            
-            planet.currentModelMat = parentTrajectory * selfRotationMat * glm::scale(glm::mat4(1.0f), glm::vec3(curRadius));
-            planet.currentPosition = worldPos;
 
-            // 3. 구름
-            if (planet.hasClouds) {
-                glm::mat4 cloudSelfRot = glm::rotate(glm::mat4(1.0f), glm::radians(planet.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
-                                       * glm::rotate(glm::mat4(1.0f), glm::radians(planet.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f)) 
-                                       * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(planet.rotationSpeed + 4.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-                planet.cloudModelMat = parentTrajectory * cloudSelfRot * glm::scale(glm::mat4(1.0f), glm::vec3(curRadius * 1.005f));
-            }
+            planet.currentPosition = parentPos + glm::dvec3(orbitTilt * glm::dvec4(localPos, 1.0));
 
-            // 4. 달 (지구를 따라갈 때 달의 크기와 거리도 믹스 연산)
-            if (i == 2) { 
-                // 하드코딩(0.75f) 제거, 구조체의 orbitRadius 사용
-                float curMoonOrbit = glm::mix(moon.orbitRadius, moon.realOrbit, easeScale);
-                float curMoonRadius = glm::mix(moon.radius, moon.realRadius, easeScale);
+            // 달은 지구(index 2)를 부모로 삼아 위치를 잡는다.
+            if (i == 2) {
+                double curMoonOrbit = glm::mix((double)moon.orbitRadius, (double)moon.realOrbit, (double)easeScale);
 
-                float ma = curMoonOrbit, me = moon.eccentricity, mb = ma * sqrt(1.0f - me * me), mc = ma * me;
-                // 하드코딩(45.0f) 제거, 구조체의 orbitSpeed 사용
-                float mAngle = glm::radians(moon.initialAngle) + slowTime * glm::radians(moon.orbitSpeed);
-                glm::vec3 mLocal = glm::vec3(ma * cos(mAngle) - mc, 0.0f, mb * sin(mAngle));
-                
-                glm::mat4 mOrbitTilt = glm::rotate(glm::mat4(1.0f), glm::radians(moon.ascendingNode), glm::vec3(0.0f, 1.0f, 0.0f))
-                                     * glm::rotate(glm::mat4(1.0f), glm::radians(moon.orbitalInclination), glm::vec3(0.0f, 0.0f, 1.0f))
-                                     * glm::rotate(glm::mat4(1.0f), glm::radians(moon.periapsisAngle), glm::vec3(0.0f, 1.0f, 0.0f));
+                double ma = curMoonOrbit, me = moon.eccentricity, mb = ma * sqrt(1.0 - me * me), mc = ma * me;
+                double mAngle = glm::radians((double)moon.initialAngle) + (double)slowTime * glm::radians((double)moon.orbitSpeed);
+                glm::dvec3 mLocal = glm::dvec3(ma * cos(mAngle) - mc, 0.0, mb * sin(mAngle));
 
-                glm::vec3 mWorldPos = glm::vec3(mOrbitTilt * glm::vec4(mLocal, 1.0f));
-                glm::mat4 moonBase = parentTrajectory * glm::translate(glm::mat4(1.0f), mWorldPos);
-                
-                // rotationSpeed가 orbitSpeed와 동일하므로 완벽하게 앞면만 바라보며 조석 고정됨!
-                glm::mat4 moonRot = glm::rotate(glm::mat4(1.0f), glm::radians(moon.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
-                                  * glm::rotate(glm::mat4(1.0f), glm::radians(moon.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
-                                  * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(moon.rotationSpeed), glm::vec3(0.0f, 1.0f, 0.0f));
+                glm::dmat4 mOrbitTilt = glm::rotate(glm::dmat4(1.0), glm::radians((double)moon.ascendingNode), glm::dvec3(0.0, 1.0, 0.0))
+                                      * glm::rotate(glm::dmat4(1.0), glm::radians((double)moon.orbitalInclination), glm::dvec3(0.0, 0.0, 1.0))
+                                      * glm::rotate(glm::dmat4(1.0), glm::radians((double)moon.periapsisAngle), glm::dvec3(0.0, 1.0, 0.0));
 
-                moon.currentModelMat = moonBase * moonRot * glm::scale(glm::mat4(1.0f), glm::vec3(curMoonRadius));
-                moon.currentPosition = glm::vec3(moonBase[3]);
+                moon.currentPosition = planet.currentPosition + glm::dvec3(mOrbitTilt * glm::dvec4(mLocal, 1.0));
             }
         }
 
@@ -1163,16 +1163,16 @@ protected:
         glm::vec3 nextTarget = glm::vec3(camera.target);
         float targetRadius = 1.0f;
         
-        if (lockedTargetType == 0) { 
-            nextTarget = sun.currentPosition; 
+        if (lockedTargetType == 0) {
+            nextTarget = glm::vec3(sun.currentPosition);
             targetRadius = glm::mix(sun.radius, sun.realRadius, easeScale); 
         }
         else if (lockedTargetType == 1 && lockedPlanetIndex != -1) { 
-            nextTarget = planets[lockedPlanetIndex].currentPosition; 
+            nextTarget = glm::vec3(planets[lockedPlanetIndex].currentPosition);
             targetRadius = glm::mix(planets[lockedPlanetIndex].radius, planets[lockedPlanetIndex].realRadius, easeScale); 
         }
         else if (lockedTargetType == 2) { 
-            nextTarget = moon.currentPosition; 
+            nextTarget = glm::vec3(moon.currentPosition);
             targetRadius = glm::mix(moon.radius, moon.realRadius, easeScale); 
         }
         
@@ -1220,6 +1220,8 @@ protected:
         camera.smoothFollow(glm::dvec3(nextTarget), deltaTime, targetChanged);
         camera.update(deltaTime);
 
+        buildBodyModelMatrices(easeScale, slowTime, time);
+
         // =========================================================
         // 🚀 시네마틱 개기일식 (궤도 고정 & 감속 정지 연출)
         // =========================================================
@@ -1233,8 +1235,8 @@ protected:
             // 1. 타겟을 강제로 달(Moon)로 고정합니다. (더블클릭 효과)
             lockedTargetType = 2; 
             
-            glm::vec3 sunPos = sun.currentPosition;
-            glm::vec3 moonPos = moon.currentPosition;
+            glm::vec3 sunPos = glm::vec3(sun.currentPosition);
+            glm::vec3 moonPos = glm::vec3(moon.currentPosition);
             
             // 2. 카메라 -> 달 -> 태양이 일직선이 되는 완벽한 방향 벡터 계산
             glm::vec3 dirFromMoonToSun = glm::normalize(sunPos - moonPos);
@@ -1268,18 +1270,18 @@ protected:
         ubo.proj[1][1] *= -1;
         ubo.cameraPos = glm::vec3(camera.getEyeWorld());
         ubo.time = time;
-        ubo.sunPos = sun.currentPosition; ubo.sunRadius = sun.radius;
-        ubo.earthPos = planets[2].currentPosition; ubo.earthRadius = planets[2].radius;
-        ubo.moonPos = moon.currentPosition; ubo.moonRadius = moon.radius;
+        ubo.sunPos = glm::vec3(sun.currentPosition); ubo.sunRadius = sun.radius;
+        ubo.earthPos = glm::vec3(planets[2].currentPosition); ubo.earthRadius = planets[2].radius;
+        ubo.moonPos = glm::vec3(moon.currentPosition); ubo.moonRadius = moon.radius;
 
         // 태양(원점)에 고정된 상태면 태양 자신을 그림자 초점으로 삼을 수 없으므로 지구로 대체한다.
         glm::vec3 shadowFocusPos = nextTarget;
-        if (lockedTargetType == 0) shadowFocusPos = planets[2].currentPosition; 
-        
-        glm::vec3 lightDir = glm::normalize(shadowFocusPos - sun.currentPosition);
+        if (lockedTargetType == 0) shadowFocusPos = glm::vec3(planets[2].currentPosition);
+
+        glm::vec3 lightDir = glm::normalize(shadowFocusPos - glm::vec3(sun.currentPosition));
         glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
         if(abs(glm::dot(lightDir, up)) > 0.99f) up = glm::vec3(0.0f, 0.0f, 1.0f);
-        glm::mat4 lightView = glm::lookAt(sun.currentPosition, shadowFocusPos, up);
+        glm::mat4 lightView = glm::lookAt(glm::vec3(sun.currentPosition), shadowFocusPos, up);
         float orthoSize = targetRadius * 5.0f + 2.0f; 
         if (lockedTargetType == 0) orthoSize = 30.0f;
         
@@ -1390,11 +1392,11 @@ protected:
                 }
             };
 
-            drawTagBox(sun.currentPosition, "Sun", IM_COL32(255, 200, 0, 255), 35.0f, (selectedTargetType == 0));
+            drawTagBox(glm::vec3(sun.currentPosition), "Sun", IM_COL32(255, 200, 0, 255), 35.0f, (selectedTargetType == 0));
             for (int i = 0; i < planets.size(); i++) {
-                drawTagBox(planets[i].currentPosition, planets[i].name, IM_COL32(255, 255, 255, 200), 35.0f, (selectedTargetType == 1 && selectedPlanetIndex == i));
+                drawTagBox(glm::vec3(planets[i].currentPosition), planets[i].name, IM_COL32(255, 255, 255, 200), 35.0f, (selectedTargetType == 1 && selectedPlanetIndex == i));
             }
-            drawTagBox(moon.currentPosition, "Moon", IM_COL32(200, 200, 200, 200), 25.0f, (selectedTargetType == 2));
+            drawTagBox(glm::vec3(moon.currentPosition), "Moon", IM_COL32(200, 200, 200, 200), 25.0f, (selectedTargetType == 2));
             ImGui::End();
 
             // =========================================================
@@ -1555,7 +1557,7 @@ protected:
         };
 
         glm::vec3 currentCameraPos = glm::vec3(camera.getEyeWorld());
-        float distToSun = glm::length(currentCameraPos - sun.currentPosition);
+        float distToSun = glm::length(currentCameraPos - glm::vec3(sun.currentPosition));
         bool shouldRenderSun = distToSun > (sun.radius * 2.6f);
 
         if (shouldRenderSun) {
@@ -1563,7 +1565,7 @@ protected:
         }
 
         for (const auto &planet : planets) {
-            float distToPlanet = glm::length(currentCameraPos - planet.currentPosition);
+            float distToPlanet = glm::length(currentCameraPos - glm::vec3(planet.currentPosition));
             if (distToPlanet > (planet.radius * 1.2f)) {
                 drawObject(planet, planet.currentModelMat, planet.typeId);
                 if (planet.hasClouds) drawObject(planet, planet.cloudModelMat, 2);
@@ -1576,7 +1578,7 @@ protected:
             }
         }
 
-        float distToMoon = glm::length(currentCameraPos - moon.currentPosition);
+        float distToMoon = glm::length(currentCameraPos - glm::vec3(moon.currentPosition));
         if (distToMoon > (moon.radius * 1.2f)) {
             drawObject(moon, moon.currentModelMat, moon.typeId);
         }
@@ -1623,7 +1625,7 @@ protected:
                                     * glm::rotate(glm::mat4(1.0f), glm::radians(planet.periapsisAngle), glm::vec3(0.0f, 1.0f, 0.0f));
                                     
                 glm::mat4 orbitCenter = glm::mat4(1.0f);
-                if (planet.parentIndex != -1) orbitCenter = glm::translate(glm::mat4(1.0f), planets[planet.parentIndex].currentPosition);
+                if (planet.parentIndex != -1) orbitCenter = glm::translate(glm::mat4(1.0f), glm::vec3(planets[planet.parentIndex].currentPosition));
                                     
                 glm::mat4 orbitModel = orbitCenter * orbitTilt * glm::translate(glm::mat4(1.0f), glm::vec3(-c, 0.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(a, 1.0f, b));
                 PushConstants orbitPush{orbitModel, 6}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &orbitPush);
@@ -1636,7 +1638,7 @@ protected:
                                  * glm::rotate(glm::mat4(1.0f), glm::radians(moon.orbitalInclination), glm::vec3(0.0f, 0.0f, 1.0f))
                                  * glm::rotate(glm::mat4(1.0f), glm::radians(moon.periapsisAngle), glm::vec3(0.0f, 1.0f, 0.0f));
                                  
-            glm::mat4 moonOrbitModel = glm::translate(glm::mat4(1.0f), planets[2].currentPosition) * mOrbitTilt * glm::translate(glm::mat4(1.0f), glm::vec3(-mc, 0.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(ma, 1.0f, mb));
+            glm::mat4 moonOrbitModel = glm::translate(glm::mat4(1.0f), glm::vec3(planets[2].currentPosition)) * mOrbitTilt * glm::translate(glm::mat4(1.0f), glm::vec3(-mc, 0.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(ma, 1.0f, mb));
             
             PushConstants moonOrbitPush{moonOrbitModel, 6}; 
             vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &moonOrbitPush);
@@ -1654,7 +1656,7 @@ protected:
             float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp); 
             float curSunRadius = glm::mix(sun.radius, sun.realRadius, easeScale);
             
-            glm::mat4 haloModel = glm::translate(glm::mat4(1.0f), sun.currentPosition) * glm::scale(glm::mat4(1.0f), glm::vec3(curSunRadius * 2.5f));
+            glm::mat4 haloModel = glm::translate(glm::mat4(1.0f), glm::vec3(sun.currentPosition)) * glm::scale(glm::mat4(1.0f), glm::vec3(curSunRadius * 2.5f));
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sun.descriptorSet, 0, nullptr);
             PushConstants haloPush{haloModel, 7}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &haloPush);
             vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0);
