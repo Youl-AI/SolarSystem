@@ -1272,8 +1272,9 @@ protected:
         ubo.earthPos = planets[2].currentPosition; ubo.earthRadius = planets[2].radius;
         ubo.moonPos = moon.currentPosition; ubo.moonRadius = moon.radius;
 
+        // 태양(원점)에 고정된 상태면 태양 자신을 그림자 초점으로 삼을 수 없으므로 지구로 대체한다.
         glm::vec3 shadowFocusPos = nextTarget;
-        if (glm::length(shadowFocusPos) < 0.1f) shadowFocusPos = planets[2].currentPosition; 
+        if (lockedTargetType == 0) shadowFocusPos = planets[2].currentPosition; 
         
         glm::vec3 lightDir = glm::normalize(shadowFocusPos - sun.currentPosition);
         glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);

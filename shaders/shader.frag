@@ -272,7 +272,7 @@ void main() {
             shadow = smoothstep(planetRadius * 0.95, planetRadius * 1.0, distToRay);
         }
         vec4 ringColor = texture(texDiffuse, fragTexCoord);
-        writeOut(vec4(ringColor.rgb * max(abs(dot(baseNormal, normalize(-fragPos))), 0.05) * shadow, ringColor.a));
+        writeOut(vec4(ringColor.rgb * max(abs(dot(baseNormal, normalize(ubo.sunPos - fragPos))), 0.05) * shadow, ringColor.a));
         return;
     }
     else if (fragObjectType == 6) { // 궤도선
@@ -298,7 +298,7 @@ void main() {
         float currentScale = length(push.model[0].xyz);
         
         // 현재 픽셀 거리에서 팽창 배율을 나누어 '원래 거리'로 되돌립니다.
-        float originalDist = length(fragPos) / currentScale; 
+        float originalDist = length(fragPos - ubo.sunPos) / currentScale; 
         
         // 팽창된 거리가 아닌 보정된 원래 거리(originalDist)를 기준으로 판별합니다!
         if (originalDist > 30.0) {
