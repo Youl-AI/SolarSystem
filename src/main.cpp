@@ -233,6 +233,9 @@ private:
     // msaaColor/msaaBright는 멀티샘플 렌더 타겟이고, 위 offscreenColor/BrightImage가 resolve 대상(계속 SAMPLED).
     // 깊이는 다운스트림에서 안 쓰므로 offscreenDepthImage 자체를 멀티샘플로 만들어 그대로 렌더 타겟으로 쓴다.
     VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkExtent2D renderExtent{}; // 오프스크린/블러 렌더 크기 = renderScale x swapChainExtent
+    float appliedRenderScale = 1.0f;
+    bool  pendingOffscreenRecreate = false; // 렌더스케일/MSAA 변경 시
     VkImage msaaColorImage = VK_NULL_HANDLE, msaaBrightImage = VK_NULL_HANDLE;
     VkDeviceMemory msaaColorMem = VK_NULL_HANDLE, msaaBrightMem = VK_NULL_HANDLE;
     VkImageView msaaColorView = VK_NULL_HANDLE, msaaBrightView = VK_NULL_HANDLE;
@@ -295,6 +298,16 @@ protected:
             pendingSwapRecreate = false;
             vkDeviceWaitIdle(device);
             recreateSwapChain();
+        }
+
+        if (settings.renderScale != appliedRenderScale) {
+            appliedRenderScale = settings.renderScale;
+            pendingOffscreenRecreate = true;
+        }
+        if (pendingOffscreenRecreate) {
+            pendingOffscreenRecreate = false;
+            vkDeviceWaitIdle(device);
+            recreateOffscreenAndBlur();
         }
 
         if (!fullscreenToggleRequested) return;
@@ -446,9 +459,9 @@ protected:
         }
     }
 
-    void recreateSwapChain() {
-        vkDeviceWaitIdle(device);
-
+    // 오프스크린/블러 이미지·프레임버퍼 전용 파괴 헬퍼. recreateSwapChain()과
+    // recreateOffscreenAndBlur() 양쪽에서 재사용한다(Task 6의 MSAA 재생성도 재사용 예정).
+    void destroyOffscreenAndBlurResources() {
         for (int i = 0; i < 2; i++) {
             vkDestroyFramebuffer(device, blurFramebuffers[i], nullptr);
             vkDestroyImageView(device, blurViews[i], nullptr);
@@ -461,14 +474,30 @@ protected:
         vkDestroyImageView(device, offscreenDepthView, nullptr); vkDestroyImage(device, offscreenDepthImage, nullptr); vkFreeMemory(device, offscreenDepthMem, nullptr);
         vkDestroyImageView(device, msaaColorView, nullptr); vkDestroyImage(device, msaaColorImage, nullptr); vkFreeMemory(device, msaaColorMem, nullptr);
         vkDestroyImageView(device, msaaBrightView, nullptr); vkDestroyImage(device, msaaBrightImage, nullptr); vkFreeMemory(device, msaaBrightMem, nullptr);
+    }
+
+    void recreateSwapChain() {
+        vkDeviceWaitIdle(device);
+
+        destroyOffscreenAndBlurResources();
 
         cleanupSwapChain();
 
         createSwapChain();
+        computeRenderExtent(); // 창 크기 변경 시 오프스크린도 scale x 새-창크기로 유지
         createImageViews();
         createDepthResources();
         createFramebuffers();
 
+        createOffscreenImages();
+        createBlurImages();
+        updateBlurDescriptorSets();
+        updatePostDescriptorSets();
+    }
+
+    // 렌더스케일(및 Task 6의 MSAA) 변경 시 오프스크린/블러만 다시 만든다. 스왑체인은 그대로.
+    void recreateOffscreenAndBlur() {
+        destroyOffscreenAndBlurResources();
         createOffscreenImages();
         createBlurImages();
         updateBlurDescriptorSets();
@@ -1023,11 +1052,19 @@ protected:
         vkDestroyShaderModule(device, vertMod, nullptr);
     }
 
+    // 오프스크린/블러 렌더 크기 = round(renderScale x swapChainExtent). 포스트/UI는 계속 swapChainExtent.
+    void computeRenderExtent() {
+        uint32_t w = std::max(1u, (uint32_t)std::lround(swapChainExtent.width  * settings.renderScale));
+        uint32_t h = std::max(1u, (uint32_t)std::lround(swapChainExtent.height * settings.renderScale));
+        renderExtent = {w, h};
+    }
+
     void createOffscreenImages() {
+        computeRenderExtent();
         VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT; VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
         auto makeImg = [&](VkFormat fmt, VkImageUsageFlags usage, VkImage& img, VkDeviceMemory& mem, VkImageView& view, VkImageAspectFlags aspect, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT) {
             VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D;
-            iInfo.extent.width = swapChainExtent.width; iInfo.extent.height = swapChainExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = fmt; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = usage; iInfo.samples = samples; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            iInfo.extent.width = renderExtent.width; iInfo.extent.height = renderExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = fmt; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = usage; iInfo.samples = samples; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             vkCreateImage(device, &iInfo, nullptr, &img);
             VkMemoryRequirements mReqs; vkGetImageMemoryRequirements(device, img, &mReqs);
             VkMemoryAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -1048,7 +1085,7 @@ protected:
 
         // 어태치먼트 순서는 렌더패스와 반드시 일치: 0=MSAA색상 1=MSAA-bright 2=MSAA깊이 3=resolve색상 4=resolve-bright
         std::array<VkImageView, 5> fbAtts = {msaaColorView, msaaBrightView, offscreenDepthView, offscreenColorView, offscreenBrightView};
-        VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = offscreenRenderPass; fbInfo.attachmentCount = 5; fbInfo.pAttachments = fbAtts.data(); fbInfo.width = swapChainExtent.width; fbInfo.height = swapChainExtent.height; fbInfo.layers = 1;
+        VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = offscreenRenderPass; fbInfo.attachmentCount = 5; fbInfo.pAttachments = fbAtts.data(); fbInfo.width = renderExtent.width; fbInfo.height = renderExtent.height; fbInfo.layers = 1;
         vkCreateFramebuffer(device, &fbInfo, nullptr, &offscreenFramebuffer);
     }
 
@@ -1087,7 +1124,7 @@ protected:
     void createBlurImages() {
         VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
         auto makeImg = [&](VkImage& img, VkDeviceMemory& mem, VkImageView& view) {
-            VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = swapChainExtent.width; iInfo.extent.height = swapChainExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = colorFormat; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = renderExtent.width; iInfo.extent.height = renderExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = colorFormat; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             vkCreateImage(device, &iInfo, nullptr, &img);
             VkMemoryRequirements mReqs; vkGetImageMemoryRequirements(device, img, &mReqs);
             VkMemoryAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; aInfo.allocationSize = mReqs.size; aInfo.memoryTypeIndex = findMemoryType(mReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -1099,7 +1136,7 @@ protected:
         for(int i = 0; i < 2; i++) makeImg(blurImages[i], blurMemories[i], blurViews[i]);
 
         for(int i = 0; i < 2; i++) {
-            VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = blurRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &blurViews[i]; fbInfo.width = swapChainExtent.width; fbInfo.height = swapChainExtent.height; fbInfo.layers = 1;
+            VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = blurRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &blurViews[i]; fbInfo.width = renderExtent.width; fbInfo.height = renderExtent.height; fbInfo.layers = 1;
             vkCreateFramebuffer(device, &fbInfo, nullptr, &blurFramebuffers[i]);
         }
     }
@@ -1695,12 +1732,13 @@ protected:
         if (settings.fullscreen != isFullscreen) fullscreenToggleRequested = true;
     }
 
-    void setFullViewport(VkCommandBuffer cb) {
-        VkViewport vp{}; vp.width = (float)swapChainExtent.width; vp.height = (float)swapChainExtent.height; vp.maxDepth = 1.0f;
-        VkRect2D sc{}; sc.extent = swapChainExtent;
+    void setViewport(VkCommandBuffer cb, VkExtent2D e) {
+        VkViewport vp{}; vp.width = (float)e.width; vp.height = (float)e.height; vp.maxDepth = 1.0f;
+        VkRect2D sc{}; sc.extent = e;
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &sc);
     }
+    void setFullViewport(VkCommandBuffer cb) { setViewport(cb, swapChainExtent); } // 포스트/스왑체인 패스용
 
     void recordCommandBuffer(VkCommandBuffer cb, uint32_t imageIndex) override {
         VkCommandBufferBeginInfo beginInfo{}; beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1743,14 +1781,14 @@ protected:
 
         VkRenderPassBeginInfo offscreenPassInfo{}; offscreenPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         offscreenPassInfo.renderPass = offscreenRenderPass; offscreenPassInfo.framebuffer = offscreenFramebuffer;
-        offscreenPassInfo.renderArea.offset = {0, 0}; offscreenPassInfo.renderArea.extent = swapChainExtent;
+        offscreenPassInfo.renderArea.offset = {0, 0}; offscreenPassInfo.renderArea.extent = renderExtent;
 
         std::array<VkClearValue, 3> clearValues{};
         clearValues[0].color = {{0.01f, 0.01f, 0.01f, 1.0f}}; clearValues[1].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; clearValues[2].depthStencil = {1.0f, 0};
         offscreenPassInfo.clearValueCount = 3; offscreenPassInfo.pClearValues = clearValues.data();
         
         vkCmdBeginRenderPass(cb, &offscreenPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        setFullViewport(cb);
+        setViewport(cb, renderExtent);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
         vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets); vkCmdBindIndexBuffer(cb, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
@@ -1907,9 +1945,9 @@ protected:
         bool horizontal = true; int blurAmount = 6; 
         for (int i = 0; i < blurAmount; i++) {
             VkRenderPassBeginInfo blurPassInfo{}; blurPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; blurPassInfo.renderPass = blurRenderPass;
-            blurPassInfo.framebuffer = blurFramebuffers[horizontal ? 0 : 1]; blurPassInfo.renderArea.offset = {0, 0}; blurPassInfo.renderArea.extent = swapChainExtent;
+            blurPassInfo.framebuffer = blurFramebuffers[horizontal ? 0 : 1]; blurPassInfo.renderArea.offset = {0, 0}; blurPassInfo.renderArea.extent = renderExtent;
             VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}}; blurPassInfo.clearValueCount = 1; blurPassInfo.pClearValues = &clearColor;
-            vkCmdBeginRenderPass(cb, &blurPassInfo, VK_SUBPASS_CONTENTS_INLINE); setFullViewport(cb); vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline);
+            vkCmdBeginRenderPass(cb, &blurPassInfo, VK_SUBPASS_CONTENTS_INLINE); setViewport(cb, renderExtent); vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline);
             int setIndex = (i == 0) ? 0 : (horizontal ? 2 : 1);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipelineLayout, 0, 1, &blurDescriptorSets[setIndex], 0, nullptr);
             int horizInt = horizontal ? 1 : 0; vkCmdPushConstants(cb, blurPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(int), &horizInt);
