@@ -1046,9 +1046,10 @@ protected:
     }
 
     // 렌더러가 그리는 좌표계로 월드 좌표를 옮긴다. 모든 모델 행렬/UBO 좌표/피킹이 이 함수를 거친다.
-    // 지금은 절대 좌표를 그대로 돌려주지만, 카메라 상대 좌표로 전환할 때 여기 한 곳만 바꾸면 된다.
+    // 뺄셈을 double로 해야 하는 이유: 리얼 스케일에서 두 항이 모두 46000 수준이라 float32로 빼면
+    // 결과(수십분의 1 유닛)에 0.0039짜리 오차가 남아 왜소행성(반지름 0.09)이 떨리고 각져 보인다.
     glm::vec3 relativeToCamera(const glm::dvec3& worldPos) const {
-        return glm::vec3(worldPos);
+        return glm::vec3(worldPos - camera.target);
     }
 
     // 천체들의 위치가 확정되고 카메라까지 갱신된 뒤에 호출된다.
@@ -1166,26 +1167,26 @@ protected:
         // =========================================================
         // 카메라 추적 업데이트
         // =========================================================
-        glm::vec3 nextTarget = glm::vec3(camera.target);
+        glm::dvec3 nextTarget = camera.target;
         float targetRadius = 1.0f;
-        
+
         if (lockedTargetType == 0) {
-            nextTarget = glm::vec3(sun.currentPosition);
-            targetRadius = glm::mix(sun.radius, sun.realRadius, easeScale); 
+            nextTarget = sun.currentPosition;
+            targetRadius = glm::mix(sun.radius, sun.realRadius, easeScale);
         }
-        else if (lockedTargetType == 1 && lockedPlanetIndex != -1) { 
-            nextTarget = glm::vec3(planets[lockedPlanetIndex].currentPosition);
-            targetRadius = glm::mix(planets[lockedPlanetIndex].radius, planets[lockedPlanetIndex].realRadius, easeScale); 
+        else if (lockedTargetType == 1 && lockedPlanetIndex != -1) {
+            nextTarget = planets[lockedPlanetIndex].currentPosition;
+            targetRadius = glm::mix(planets[lockedPlanetIndex].radius, planets[lockedPlanetIndex].realRadius, easeScale);
         }
-        else if (lockedTargetType == 2) { 
-            nextTarget = glm::vec3(moon.currentPosition);
-            targetRadius = glm::mix(moon.radius, moon.realRadius, easeScale); 
+        else if (lockedTargetType == 2) {
+            nextTarget = moon.currentPosition;
+            targetRadius = glm::mix(moon.radius, moon.realRadius, easeScale);
         }
         
         static bool isFirstFrame = true;
         if (isFirstFrame) {
-            camera.target = glm::dvec3(nextTarget);
-            camera.lastNewTarget = glm::dvec3(nextTarget);
+            camera.target = nextTarget;
+            camera.lastNewTarget = nextTarget;
             camera.targetDistance = targetRadius * 6.0f;
             camera.currentDistance = targetRadius * 6.0f;
             isFirstFrame = false;
@@ -1223,7 +1224,7 @@ protected:
             camera.targetDistance = camera.minDistance; 
         }
         
-        camera.smoothFollow(glm::dvec3(nextTarget), deltaTime, targetChanged);
+        camera.smoothFollow(nextTarget, deltaTime, targetChanged);
         camera.update(deltaTime);
 
         // =========================================================
@@ -1284,7 +1285,7 @@ protected:
         ubo.moonPos = relativeToCamera(moon.currentPosition); ubo.moonRadius = moon.radius;
 
         // 태양(원점)에 고정된 상태면 태양 자신을 그림자 초점으로 삼을 수 없으므로 지구로 대체한다.
-        glm::dvec3 shadowFocusWorld = glm::dvec3(nextTarget);
+        glm::dvec3 shadowFocusWorld = nextTarget;
         if (lockedTargetType == 0) shadowFocusWorld = planets[2].currentPosition;
         glm::vec3 shadowFocusPos = relativeToCamera(shadowFocusWorld);
         glm::vec3 sunPosRel = relativeToCamera(sun.currentPosition);

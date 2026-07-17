@@ -112,11 +112,13 @@ public:
     // 카메라 눈의 절대 월드 좌표.
     glm::dvec3 getEyeWorld() const { return target + glm::dvec3(pos); }
 
+    // 렌더링은 카메라 상대 좌표계에서 이뤄진다. 이 좌표계에서 타겟은 정의상 원점이고
+    // 눈은 그로부터 pos만큼 떨어져 있다. (relativeToCamera()가 같은 규약을 쓴다)
     glm::mat4 getViewMatrix() const
     {
         // =========================================================
         // 🚀 [NEW] 기존의 가변 up 벡터를 지우고, 절대 고정된 WORLD_UP을 사용합니다!
         // =========================================================
-        return glm::lookAt(glm::vec3(target) + pos, glm::vec3(target), WORLD_UP);
+        return glm::lookAt(pos, glm::vec3(0.0f), WORLD_UP);
     }
 };
