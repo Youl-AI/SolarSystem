@@ -865,26 +865,45 @@ In `onFrameStart()`, add near the render-scale check:
 
 - [ ] **Step 2: Add `recreateOffscreenForMsaa()`**
 
-This must rebuild the offscreen render pass (sample count changed) AND the two offscreen pipelines (their `rasterizationSamples` is baked at creation). Add:
+Only the offscreen render pass (sample count in its attachments) and the two offscreen pipelines
+(`rasterizationSamples` baked at creation) depend on MSAA. **Blur and post do NOT** — they sample the
+*resolved*, always-single-sample offscreen images, so their render passes/images/pipelines are left
+untouched; we only rebind the two descriptor sets because the resolve-target image views were
+recreated. `createGraphicsPipeline()` creates `graphicsPipeline` + `linePipeline` + `pipelineLayout`
+(that layout is used only by those two pipelines). `createOffscreenResources()` creates the offscreen
+render pass, the images (via `createOffscreenImages()`), AND the `offscreenSampler` — so the old
+render pass and sampler must be destroyed first or they leak (they are otherwise freed only in
+`cleanupApp`). `updatePostDescriptorSets` / `updateBlurDescriptorSets` both bind offscreen views with
+`offscreenSampler`, so they correctly rebind the recreated views + sampler.
+
+Do NOT use `destroyOffscreenAndBlurResources()` here — it also destroys the blur images (which we are
+keeping) and does not destroy the offscreen render pass or sampler (which we must). Add:
 
 ```cpp
     void recreateOffscreenForMsaa() {
-        // 오프스크린 파이프라인 2개(graphics/line)와 렌더패스는 샘플 수가 생성 시 고정되므로 다시 만든다.
+        // 오프스크린 파이프라인(graphics/line)과 렌더패스는 샘플 수가 생성 시 고정되므로 다시 만든다.
+        // 블러/포스트는 resolve된 단일 샘플 이미지를 쓰므로 MSAA와 무관 — 렌더패스/이미지는 그대로 두고
+        // resolve 대상 뷰만 새로 바인딩한다.
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipeline(device, linePipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        // 오프스크린 이미지/프레임버퍼/렌더패스 파괴 (recreateOffscreenAndBlur의 teardown과 동일 대상)
-        destroyOffscreenAndBlurResources(); // Task 5에서 추출한 teardown 헬퍼 재사용
-        createOffscreenResources();  // 렌더패스 + 이미지 (msaaSamples 반영)
-        createBlurResources();
-        createBlurPipeline();
-        createGraphicsPipeline();    // graphics + line 파이프라인 (msaaSamples 반영)
-        updateBlurDescriptorSets();
-        updatePostDescriptorSets();
+
+        vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr);
+        vkDestroyImageView(device, offscreenColorView, nullptr); vkDestroyImage(device, offscreenColorImage, nullptr); vkFreeMemory(device, offscreenColorMem, nullptr);
+        vkDestroyImageView(device, offscreenBrightView, nullptr); vkDestroyImage(device, offscreenBrightImage, nullptr); vkFreeMemory(device, offscreenBrightMem, nullptr);
+        vkDestroyImageView(device, offscreenDepthView, nullptr); vkDestroyImage(device, offscreenDepthImage, nullptr); vkFreeMemory(device, offscreenDepthMem, nullptr);
+        vkDestroyImageView(device, msaaColorView, nullptr); vkDestroyImage(device, msaaColorImage, nullptr); vkFreeMemory(device, msaaColorMem, nullptr);
+        vkDestroyImageView(device, msaaBrightView, nullptr); vkDestroyImage(device, msaaBrightImage, nullptr); vkFreeMemory(device, msaaBrightMem, nullptr);
+        vkDestroyRenderPass(device, offscreenRenderPass, nullptr);
+        vkDestroySampler(device, offscreenSampler, nullptr);
+
+        createOffscreenResources();  // 렌더패스 + 이미지 + 프레임버퍼 + 샘플러 (새 msaaSamples 반영)
+        createGraphicsPipeline();    // graphics + line + pipelineLayout (새 msaaSamples 반영)
+
+        updateBlurDescriptorSets();  // 새 offscreenBrightView + 새 샘플러 재바인딩
+        updatePostDescriptorSets();  // 새 offscreenColorView + 새 샘플러 재바인딩
     }
 ```
-
-If Task 5 did not already extract a `destroyOffscreenAndBlurResources()` teardown helper, extract it now from the duplicated destroy sequences in `recreateSwapChain`/`cleanupSwapChain` and use it in both `recreateOffscreenAndBlur()` and here. Show the helper. Confirm the pipeline-creation function name (`createGraphicsPipeline` or equivalent that builds both `graphicsPipeline` and `linePipeline`) and call the correct one.
 
 - [ ] **Step 3: Build + commit**
 
