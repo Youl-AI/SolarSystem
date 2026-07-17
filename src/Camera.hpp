@@ -8,8 +8,10 @@
 class Camera
 {
 public:
-    glm::vec3 target = glm::vec3(5.0f, 0.0f, 0.0f);
-    glm::vec3 pos = glm::vec3(0.0f, 0.0f, 1.0f); 
+    // target은 리얼 스케일에서 46000 유닛까지 커지는 누적값이다. float32면 그 지점의 눈금이
+    // 0.0039라 왜소행성 반지름(0.09)의 4%나 되므로, 상대 좌표 뺄셈이 정확하도록 double로 둔다.
+    glm::dvec3 target = glm::dvec3(5.0, 0.0, 0.0);
+    glm::vec3 pos = glm::vec3(0.0f, 0.0f, 1.0f); // 타겟 기준 궤도 오프셋이라 항상 작다
 
     // =========================================================
     // 🚀 [NEW] 턴테이블 카메라의 핵심: 절대 회전각(Yaw, Pitch) 유지
@@ -30,7 +32,7 @@ public:
     double lastX = 0.0;
     double lastY = 0.0;
 
-    glm::vec3 lastNewTarget = glm::vec3(5.0f, 0.0f, 0.0f);
+    glm::dvec3 lastNewTarget = glm::dvec3(5.0, 0.0, 0.0);
 
     void processMouseDrag(double xpos, double ypos)
     {
@@ -73,20 +75,20 @@ public:
     // targetChanged: 다른 천체로 갈아탄 프레임인지 여부.
     // 갈아탄 순간에 속도 피드포워드를 적용하면 두 천체의 거리만큼 타겟이 순간이동해 버리므로,
     // 그 프레임만 피드포워드를 건너뛰고 아래 보간이 부드럽게 날아가도록 맡긴다.
-    void smoothFollow(glm::vec3 newTarget, float deltaTime, bool targetChanged = false)
+    void smoothFollow(glm::dvec3 newTarget, float deltaTime, bool targetChanged = false)
     {
         if (targetChanged) {
             lastNewTarget = newTarget;
         } else {
             // 공전 중인 천체의 이번 프레임 이동량을 그대로 상쇄해 카메라를 붙여 놓는다.
             // (이게 없으면 보간만으로는 움직이는 천체를 영원히 따라잡지 못하고 속도/5 만큼 뒤처진다)
-            glm::vec3 targetVelocity = newTarget - lastNewTarget;
+            glm::dvec3 targetVelocity = newTarget - lastNewTarget;
             lastNewTarget = newTarget;
             target += targetVelocity;
         }
 
-        float lerpFactor = 5.0f * deltaTime;
-        target = glm::mix(target, newTarget, std::clamp(lerpFactor, 0.0f, 1.0f));
+        double lerpFactor = 5.0 * (double)deltaTime;
+        target = glm::mix(target, newTarget, std::clamp(lerpFactor, 0.0, 1.0));
     }
 
     void update(float deltaTime)
@@ -107,11 +109,14 @@ public:
         pos = glm::normalize(newPos) * currentDistance;
     }
 
+    // 카메라 눈의 절대 월드 좌표.
+    glm::dvec3 getEyeWorld() const { return target + glm::dvec3(pos); }
+
     glm::mat4 getViewMatrix() const
     {
         // =========================================================
         // 🚀 [NEW] 기존의 가변 up 벡터를 지우고, 절대 고정된 WORLD_UP을 사용합니다!
         // =========================================================
-        return glm::lookAt(target + pos, target, WORLD_UP);
+        return glm::lookAt(glm::vec3(target) + pos, glm::vec3(target), WORLD_UP);
     }
 };

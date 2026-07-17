@@ -324,7 +324,7 @@ protected:
         if (!tagHit) {
             glm::vec4 eyeCoords = glm::inverse(proj) * glm::vec4(ndcX, ndcY, 0.5f, 1.0f);
             glm::vec3 rayWorldDir = glm::normalize(glm::vec3(glm::inverse(view) * glm::vec4(eyeCoords.x, eyeCoords.y, -1.0f, 0.0f)));
-            glm::vec3 rayOrigin = camera.target + camera.pos;
+            glm::vec3 rayOrigin = glm::vec3(camera.getEyeWorld());
 
             float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp);
             float curSunRad = glm::mix(sun.radius, sun.realRadius, easeScale);
@@ -1160,7 +1160,7 @@ protected:
         // =========================================================
         // 카메라 추적 업데이트
         // =========================================================
-        glm::vec3 nextTarget = camera.target;
+        glm::vec3 nextTarget = glm::vec3(camera.target);
         float targetRadius = 1.0f;
         
         if (lockedTargetType == 0) { 
@@ -1178,8 +1178,8 @@ protected:
         
         static bool isFirstFrame = true;
         if (isFirstFrame) {
-            camera.target = nextTarget;
-            camera.lastNewTarget = nextTarget;
+            camera.target = glm::dvec3(nextTarget);
+            camera.lastNewTarget = glm::dvec3(nextTarget);
             camera.targetDistance = targetRadius * 6.0f;
             camera.currentDistance = targetRadius * 6.0f;
             isFirstFrame = false;
@@ -1217,7 +1217,7 @@ protected:
             camera.targetDistance = camera.minDistance; 
         }
         
-        camera.smoothFollow(nextTarget, deltaTime, targetChanged);
+        camera.smoothFollow(glm::dvec3(nextTarget), deltaTime, targetChanged);
         camera.update(deltaTime);
 
         // =========================================================
@@ -1252,7 +1252,7 @@ protected:
             // 5. 현재 카메라 상태에서 완벽한 일식 뷰 상태로 부드럽게 섞어줍니다(Lerp).
             float ease = eclipseLerp * eclipseLerp * (3.0f - 2.0f * eclipseLerp);
             
-            camera.target = glm::mix(camera.target, moonPos, ease);
+            camera.target = glm::mix(camera.target, glm::dvec3(moonPos), (double)ease);
             
             // 절대 좌표가 아닌 오프셋(perfectCamOffset)을 덮어씌웁니다.
             camera.pos = glm::mix(camera.pos, perfectCamOffset, ease);
@@ -1266,7 +1266,7 @@ protected:
         ubo.view = camera.getViewMatrix();
         ubo.proj = glm::perspective(glm::radians(camera.fov), swapChainExtent.width / (float)swapChainExtent.height, 0.01f, 1000000.0f);
         ubo.proj[1][1] *= -1;
-        ubo.cameraPos = camera.target + camera.pos; 
+        ubo.cameraPos = glm::vec3(camera.getEyeWorld());
         ubo.time = time;
         ubo.sunPos = sun.currentPosition; ubo.sunRadius = sun.radius;
         ubo.earthPos = planets[2].currentPosition; ubo.earthRadius = planets[2].radius;
@@ -1554,7 +1554,7 @@ protected:
             vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0); 
         };
 
-        glm::vec3 currentCameraPos = camera.target + camera.pos;
+        glm::vec3 currentCameraPos = glm::vec3(camera.getEyeWorld());
         float distToSun = glm::length(currentCameraPos - sun.currentPosition);
         bool shouldRenderSun = distToSun > (sun.radius * 2.6f);
 
