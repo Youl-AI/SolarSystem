@@ -116,6 +116,7 @@ private:
     bool isFullscreen = false;
     bool fullscreenToggleRequested = false;
     bool settingsOpen = false;
+    VkDescriptorSet gearTexId = VK_NULL_HANDLE;  // assets/settings.png를 ImGui 텍스처로 등록한 핸들
     bool pendingSwapRecreate = false;   // 해상도/VSync 변경 시
     int  appliedResolutionIndex = 2;
     bool appliedVsync = true;
@@ -582,8 +583,8 @@ protected:
                 else if (k == "frameCap")        settings.frameCap = std::max(0, std::stoi(v));
                 else if (k == "showFps")         settings.showFps = (std::stoi(v) != 0);
                 else if (k == "fullscreen")      settings.fullscreen = (std::stoi(v) != 0);
-                else if (k == "orbitLines")      settings.orbitLines = (std::stoi(v) != 0);
-                else if (k == "realScale")       settings.realScale = (std::stoi(v) != 0);
+                // orbitLines / realScale은 의도적으로 복원하지 않는다: 매 실행 항상 OFF로 시작하는
+                // 런타임 뷰 토글이다. (구버전 settings.ini에 남아 있어도 무시)
             } catch (...) { /* 잘못된 값은 무시하고 기본값 유지 */ }
         }
     }
@@ -599,9 +600,8 @@ protected:
           << "exposure="        << settings.exposure        << "\n"
           << "frameCap="        << settings.frameCap        << "\n"
           << "showFps="         << (settings.showFps ? 1 : 0) << "\n"
-          << "fullscreen="      << (settings.fullscreen ? 1 : 0) << "\n"
-          << "orbitLines="      << (settings.orbitLines ? 1 : 0) << "\n"
-          << "realScale="       << (settings.realScale ? 1 : 0) << "\n";
+          << "fullscreen="      << (settings.fullscreen ? 1 : 0) << "\n";
+        // orbitLines / realScale은 저장하지 않는다 — 항상 OFF로 시작하는 런타임 전용 뷰 토글.
     }
 
     void initApp() override {
@@ -986,8 +986,15 @@ protected:
         init_info.MinImageCount = 2;
         init_info.ImageCount = 2;
         init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-        init_info.RenderPass = renderPass; 
-        ImGui_ImplVulkan_Init(&init_info); 
+        init_info.RenderPass = renderPass;
+        ImGui_ImplVulkan_Init(&init_info);
+
+        // 기어 버튼용 아이콘. loadTexture가 이미지/뷰/메모리를 allImages 등에 등록해 수명을 관리하고,
+        // AddTexture로 얻은 디스크립터셋은 imguiPool과 함께 해제된다. 로드 실패 시 gearTexId는 NULL로
+        // 남아, 렌더링 쪽에서 기존 "[=]" 텍스트 버튼으로 폴백한다.
+        VkImageView gearView = loadGrayIcon("assets/settings.png", 175);  // 어두운 배경에서도 보이는 밝은 회색
+        if (gearView != VK_NULL_HANDLE)
+            gearTexId = ImGui_ImplVulkan_AddTexture(textureSampler, gearView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
     void createShadowResources() {
@@ -1562,13 +1569,17 @@ protected:
         // =========================================================
         // 0. 우측 상단 설정(기어) 버튼 (LOBBY/SIMULATION 공통) + 설정 창
         // =========================================================
-        ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - 80.0f, 20.0f), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(60.0f, 60.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - 84.0f, 20.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(64.0f, 64.0f), ImGuiCond_Always);
         ImGui::Begin("Gear", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.3f, 0.4f, 0.7f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.7f, 0.9f));
-        if (ImGui::Button("[=]", ImVec2(50.0f, 40.0f))) settingsOpen = !settingsOpen; // 기어 대용 라벨
-        ImGui::PopStyleColor(2);
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));   // 배경 완전 투명 (기어만 보이도록)
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));   // 호버 하이라이트 없음
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0, 0, 0, 0));
+        bool gearClicked = gearTexId
+            ? ImGui::ImageButton("gear", gearTexId, ImVec2(40.0f, 40.0f))   // assets/settings.png 아이콘
+            : ImGui::Button("[=]", ImVec2(50.0f, 40.0f));                   // 로드 실패 시 텍스트 폴백
+        if (gearClicked) settingsOpen = !settingsOpen;
+        ImGui::PopStyleColor(3);
         ImGui::End();
 
         applyLiveSettings();            // settings -> 기존 상태 동기화 (창이 닫혀 있어도 매 프레임)
@@ -2088,6 +2099,47 @@ private:
         transitionImageLayout(img, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
         view = createImageView(img, format, VK_IMAGE_ASPECT_COLOR_BIT);
+        allImages.push_back(img); allMemories.push_back(mem); allViews.push_back(view); return view;
+    }
+
+    // 모노크롬 UI 아이콘 로더. 형태는 PNG의 알파 채널이 정의하고(배경/중앙은 alpha=0으로 투명),
+    // 색은 지정한 회색으로 통일한다. 원본 획이 검정이라 ImGui tint(곱셈)로는 밝게 만들 수 없어
+    // RGB를 직접 덮어쓴다. 512px 원본을 40px 버튼에 밉맵 없이 축소하면 얇은 획이 계단현상을
+    // 일으키므로, CPU 박스 평균으로 64x64로 먼저 줄여 알파 기반 안티앨리어싱을 확보한다.
+    VkImageView loadGrayIcon(const std::string &path, uint8_t gray) {
+        int sw, sh, ch;
+        stbi_uc *src = stbi_load(path.c_str(), &sw, &sh, &ch, STBI_rgb_alpha);
+        if (!src) { std::cerr << "아이콘 없음: " << path << "\n"; return VK_NULL_HANDLE; }
+
+        const int tw = 64, th = 64;
+        std::vector<uint8_t> dst(tw * th * 4);
+        for (int ty = 0; ty < th; ++ty) {
+            for (int tx = 0; tx < tw; ++tx) {
+                int x0 = tx * sw / tw, x1 = (tx + 1) * sw / tw;
+                int y0 = ty * sh / th, y1 = (ty + 1) * sh / th;
+                if (x1 <= x0) x1 = x0 + 1;
+                if (y1 <= y0) y1 = y0 + 1;
+                uint32_t aSum = 0, n = 0;
+                for (int y = y0; y < y1; ++y)
+                    for (int x = x0; x < x1; ++x) { aSum += src[(y * sw + x) * 4 + 3]; ++n; }
+                int di = (ty * tw + tx) * 4;
+                dst[di + 0] = gray; dst[di + 1] = gray; dst[di + 2] = gray;
+                dst[di + 3] = (uint8_t)(aSum / n);   // 다운스케일된 알파 = 부드러운 회색 기어 형태
+            }
+        }
+        stbi_image_free(src);
+
+        VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;   // 평면 UI 회색이라 sRGB 변환 없이 그대로 표시
+        VkDeviceSize imageSize = (VkDeviceSize)tw * th * 4; VkBuffer sb; VkDeviceMemory sbm;
+        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sbm);
+        void *data; vkMapMemory(device, sbm, 0, imageSize, 0, &data); memcpy(data, dst.data(), (size_t)imageSize); vkUnmapMemory(device, sbm);
+        VkImage img; VkDeviceMemory mem;
+        createImage(tw, th, format, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, img, mem);
+        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        copyBufferToImage(sb, img, (uint32_t)tw, (uint32_t)th);
+        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vkDestroyBuffer(device, sb, nullptr); vkFreeMemory(device, sbm, nullptr);
+        VkImageView view = createImageView(img, format, VK_IMAGE_ASPECT_COLOR_BIT);
         allImages.push_back(img); allMemories.push_back(mem); allViews.push_back(view); return view;
     }
 
