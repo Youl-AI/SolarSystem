@@ -351,23 +351,20 @@ void main() {
     // ---------------------------------------------------------
     else if (fragObjectType == 10) {
         vec4 galaxyTex = texture(texDiffuse, fragTexCoord);
-        
+
         float brightness = max(max(galaxyTex.r, galaxyTex.g), galaxyTex.b);
         float distToCenter = length(fragTexCoord - vec2(0.5));
-        float edgeFade = smoothstep(0.48, 0.2, distToCenter); 
-        
-        // 🚀 [수정됨] C++에서 계산해준 0.0 ~ 1.0 사이의 페이드인 투명도를 그대로 갖다 씁니다!
-        float distanceFade = push.customData; 
-        
-        // 최종 투명도 조립
-        float alpha = brightness * edgeFade * distanceFade; 
-        
-        // 찌꺼기 픽셀 차단 (알파가 0.0일 땐 렌더링 자체가 증발하여 완벽히 사라짐)
-        if (alpha < 0.02) discard; 
-        
+        float edgeFade = smoothstep(0.48, 0.2, distToCenter);
+
+        // C++에서 계산한 거리 기반 페이드인(0~1). 곡선은 main.cpp에서 smoothstep으로 부드럽게 처리.
+        float distanceFade = push.customData;
+
+        float alpha = brightness * edgeFade * distanceFade;
+        if (alpha < 0.02) discard;
+
         vec3 finalColor = galaxyTex.rgb * vec3(0.85, 0.95, 1.3);
-        
-        writeOut(vec4(finalColor * 1.5, alpha * 0.8)); 
+
+        writeOut(vec4(finalColor * 1.5, alpha * 0.8));
         return;
     }
 }

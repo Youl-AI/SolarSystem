@@ -1962,8 +1962,10 @@ protected:
         float fadeEnd   = glm::mix(5000.0f, 900000.0f, scaleLerp); 
         
         float galaxyAlpha = (camera.currentDistance - fadeStart) / (fadeEnd - fadeStart);
-        galaxyAlpha = std::clamp(galaxyAlpha, 0.0f, 1.0f); 
-        galaxyAlpha = std::pow(galaxyAlpha, 3.0f); 
+        galaxyAlpha = std::clamp(galaxyAlpha, 0.0f, 1.0f);
+        // pow(t,3)은 거의 안 보이다가 끝에서 확 뜨는 딱딱한 곡선이라 부자연스러웠다.
+        // smoothstep(ease-in-out)으로 바꿔 자연스럽게 서서히 나타나게 한다.
+        galaxyAlpha = galaxyAlpha * galaxyAlpha * (3.0f - 2.0f * galaxyAlpha);
         
         // 🚀 [핵심 추가] 천문학적 고증: 은하의 중심핵(Core)을 태양계로부터 X축 방향으로 확 밀어냅니다!
         // 우리 태양계는 은하 중심으로부터 반경의 약 60% 지점에 위치해 있습니다.
