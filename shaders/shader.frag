@@ -196,9 +196,12 @@ void main() {
         vec2 uv = fragTexCoord;
 
         if (fragObjectType == 9) {
-            float distFromEquator = abs(uv.y - 0.5) * 2.0; 
-            float differentialSpeed = (1.0 - distFromEquator) * 0.005; 
-            uv.x -= ubo.time * differentialSpeed;
+            // 실제 목성 대기는 흐르지만, 정적 텍스처에 시간비례 차등 스크롤(time*speed)을 주면
+            // 위도 간 어긋남이 무한 누적되어 무늬가 찢어진다. sin으로 좁은 범위를 왕복만 시켜
+            // 누적 없이 은은한 대기 일렁임만 남긴다(강체 자전은 모델 행렬이 담당한다).
+            float distFromEquator = abs(uv.y - 0.5) * 2.0;
+            float sway = sin(ubo.time * 0.05 + distFromEquator * 6.2831) * 0.004;
+            uv.x += sway;
         }
 
         vec3 preciseNormal = calculateNormal(uv, baseNormal);
