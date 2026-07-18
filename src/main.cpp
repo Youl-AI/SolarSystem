@@ -328,9 +328,12 @@ protected:
             glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
             glfwSetWindowMonitor(window, nullptr, 0, 0, mode->width, mode->height, mode->refreshRate);
         } else {
-            int xpos = (mode->width - static_cast<int>(WIDTH)) / 2;
-            int ypos = (mode->height - static_cast<int>(HEIGHT)) / 2;
-            glfwSetWindowMonitor(window, nullptr, xpos, ypos, static_cast<int>(WIDTH), static_cast<int>(HEIGHT), 0);
+            // 전체화면 해제: 하드코딩된 기본 크기가 아니라 선택된 해상도로 복귀한다.
+            int w = kResolutions[settings.resolutionIndex][0];
+            int h = kResolutions[settings.resolutionIndex][1];
+            int xpos = std::max(0, (mode->width - w) / 2);
+            int ypos = std::max(0, (mode->height - h) / 2);
+            glfwSetWindowMonitor(window, nullptr, xpos, ypos, w, h, 0);
             glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
         }
         isFullscreen = !isFullscreen;
@@ -1703,17 +1706,33 @@ protected:
     }
 
     void drawSettingsWindow() {
-        ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width * 0.5f - 220.0f, swapChainExtent.height * 0.5f - 240.0f), ImGuiCond_Appearing);
-        ImGui::SetNextWindowSize(ImVec2(440.0f, 480.0f), ImGuiCond_Appearing);
-        ImGui::Begin("SETTINGS", &settingsOpen, ImGuiWindowFlags_NoCollapse);
+        // 설정 창은 해상도가 바뀌어도 항상 화면 중앙에 고정한다(같은 상대 위치 + 잘림 방지).
+        // 크기는 고정: 내용이 고정된 컨트롤 목록이라 해상도에 맞춰 키우면 여백만 늘어 비어 보인다.
+        // 440x480은 최소 해상도(1280x720)에도 여유롭게 들어간다. NoMove로 드래그 스냅백도 방지.
+        const ImVec2 settingsSize(440.0f, 480.0f);
+        ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width * 0.5f - settingsSize.x * 0.5f,
+                                       swapChainExtent.height * 0.5f - settingsSize.y * 0.5f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(settingsSize, ImGuiCond_Always);
+        ImGui::Begin("SETTINGS", &settingsOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove);
 
         ImGui::SeparatorText("GRAPHICS");
 
         // Resolution / Render Scale / MSAA / VSync: 값은 여기서 고르고, 실제 적용은 Task 3-5에서
         // pendingRecreate 경로가 담당한다. 이 태스크에서는 위젯만 배치하고 settings에 반영한다.
         {
-            const char* resLabels[] = {"1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
-            ImGui::Combo("Resolution", &settings.resolutionIndex, resLabels, RESOLUTION_COUNT);
+            // Display: 창모드 해상도 목록 + 마지막 항목 "Fullscreen"을 하나의 셀렉터로 통합.
+            // 전체화면에서는 해상도 조정이 무의미하므로(항상 모니터 네이티브로 렌더) 합쳤다.
+            // 저해상도로 "다운스케일"된 느낌이 필요하면 아래 Render Scale이 그 역할을 한다.
+            const char* displayLabels[] = {"1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160", "Fullscreen"};
+            int displayIdx = settings.fullscreen ? RESOLUTION_COUNT : settings.resolutionIndex;
+            if (ImGui::Combo("Display", &displayIdx, displayLabels, RESOLUTION_COUNT + 1)) {
+                if (displayIdx == RESOLUTION_COUNT) {
+                    settings.fullscreen = true;              // resolutionIndex는 유지 → 해제 시 복귀
+                } else {
+                    settings.fullscreen = false;
+                    settings.resolutionIndex = displayIdx;
+                }
+            }
 
             const char* scaleLabels[] = {"0.5x", "0.75x", "1.0x", "1.5x", "2.0x"};
             static const float scaleVals[] = {0.5f, 0.75f, 1.0f, 1.5f, 2.0f};
@@ -1740,7 +1759,6 @@ protected:
             if (ImGui::Combo("Frame Cap", &capIdx, capLabels, 5)) settings.frameCap = capVals[capIdx];
         }
         ImGui::Checkbox("Show FPS", &settings.showFps);
-        ImGui::Checkbox("Fullscreen", &settings.fullscreen);
 
         ImGui::SeparatorText("VIEW");
         bool inSim = (currentAppState == AppState::SIMULATION);
