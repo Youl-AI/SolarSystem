@@ -170,7 +170,7 @@ private:
 
     // 고정된 천체의 궤도선은 매 프레임 CPU에서 double로, 카메라 상대 좌표로 다시 만든다.
     // 공유 단위원 + 모델 행렬 방식으로는 GPU가 34000짜리 항끼리 빼면서 정밀도를 잃기 때문.
-    static constexpr int LOCKED_ORBIT_SEGMENTS = 4096;
+    static constexpr int LOCKED_ORBIT_SEGMENTS = 16384;
     VkBuffer lockedOrbitBuffer = VK_NULL_HANDLE;
     VkDeviceMemory lockedOrbitMemory = VK_NULL_HANDLE;
     void* lockedOrbitMapped = nullptr;
@@ -1521,7 +1521,7 @@ protected:
         // 여기보다 위에서 모델 행렬을 만들면 모델은 일식 전 타겟을, 뷰 행렬은 일식 후 타겟을
         // 보게 되어 카메라 상대 좌표계에서 천체가 통째로 어긋난다.
         buildBodyModelMatrices(easeScale, slowTime, time);
-        updateLockedOrbitLine(easeScale);
+        updateLockedOrbitLine(easeScale, slowTime);
 
         UniformBufferObject ubo{};
         ubo.view = camera.getViewMatrix();
@@ -2308,7 +2308,7 @@ private:
 
     // 고정된 천체의 궤도를 double로 계산해 카메라 상대 좌표 정점으로 굽는다.
     // 궤도 자체는 부모(태양 또는 모행성) 기준이므로 부모 위치를 더해 월드 좌표를 만든 뒤 상대화한다.
-    void updateLockedOrbitLine(float easeScale) {
+    void updateLockedOrbitLine(float easeScale, float slowTime) {
         lockedOrbitValid = false;
         if (lockedTargetType != 1 || lockedPlanetIndex < 0 || lockedPlanetIndex >= (int)planets.size()) return;
 
@@ -2326,9 +2326,14 @@ private:
         glm::dvec3 parentPos = glm::dvec3(0.0);
         if (p.parentIndex != -1) parentPos = planets[p.parentIndex].currentPosition;
 
+        // 위상 정렬: 샘플 격자를 행성의 현재 궤도각(physics update와 동일한 식)에 맞춰 회전시켜,
+        // 정점 0이 행성 위치(=카메라 초점)에 bit-exact로 오도록 한다. 정점이 매 프레임 행성과 함께
+        // 움직이므로, 카메라가 고정 정점들 사이를 미끄러지며 생기던 근거리 호의 아른거림이 사라진다.
+        double phase = glm::radians((double)p.initialAngle) + (double)slowTime * glm::radians((double)p.orbitSpeed);
+
         lockedOrbitScratch.resize(LOCKED_ORBIT_SEGMENTS + 1);
         for (int i = 0; i <= LOCKED_ORBIT_SEGMENTS; ++i) {
-            double ang = (double)i / (double)LOCKED_ORBIT_SEGMENTS * 2.0 * M_PI;
+            double ang = phase + (double)i / (double)LOCKED_ORBIT_SEGMENTS * 2.0 * M_PI;
             glm::dvec3 local = glm::dvec3(a * cos(ang) - c, 0.0, b * sin(ang));
             glm::dvec3 world = parentPos + glm::dvec3(tilt * glm::dvec4(local, 1.0));
             lockedOrbitScratch[i] = {relativeToCamera(world), glm::vec3(0.2f, 0.4f, 0.0f), glm::vec2(0.0f), glm::vec3(0, 1, 0)};
