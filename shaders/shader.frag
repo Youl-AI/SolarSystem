@@ -259,12 +259,15 @@ void main() {
         writeOut(vec4(finalColor + nightLights + atmosphericGlow, 1.0));
         return;
     }
-    else if (fragObjectType == 1) { // 달
+    else if (fragObjectType == 1) { // 달 · 위성 · 왜소행성
+        // normal 맵을 반영해 크레이터 요철이 명암 경계에서 드러나게 한다.
+        // normal 맵이 없는 천체는 더미 평면 법선(0,0,1)이 바인딩되어 있어 기존 외형이 그대로 유지된다.
+        vec3 preciseNormal = calculateNormal(fragTexCoord, baseNormal);
         float shadow = ProjectShadow(fragPos, ubo.sunPos, ubo.earthPos, ubo.earthRadius);
-        float diff = max(dot(baseNormal, lightDir), 0.0) * shadow;
+        float diff = max(dot(preciseNormal, lightDir), 0.0) * shadow;
         writeOut(vec4(texture(texDiffuse, fragTexCoord).rgb * diff, 1.0));
         return;
-    } 
+    }
     else if (fragObjectType == 2) { // 구름
         float shadow = ProjectShadow(fragPos, ubo.sunPos, ubo.moonPos, ubo.moonRadius);
         float diff = max(dot(baseNormal, lightDir), 0.0) * shadow;
