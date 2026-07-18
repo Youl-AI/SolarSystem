@@ -1507,8 +1507,17 @@ protected:
             // 2. 카메라 -> 달 -> 태양이 일직선이 되는 완벽한 방향 벡터 계산
             glm::vec3 dirFromMoonToSun = glm::normalize(sunPos - moonPos);
             
-            // 3. 엔진 허용 최대 확대 거리 (달 반지름 + 0.2f 최소 여백)
-            float targetZoom = moon.radius + 0.2f; 
+            // 3. 카메라-달 거리를 "달의 각크기 == 태양의 각크기"가 되도록 계산한다.
+            //    실제 개기일식처럼 달이 태양을 딱 맞게 가리도록. (기존엔 달 반지름 기준 고정이라
+            //    real scale에서 달이 태양보다 몇 배 커져 과하게 가렸다.)
+            //    달 각크기 = moonR / camDist, 태양 각크기 ≈ sunR / dist(moon,sun) →
+            //    camDist = moonR * dist(moon,sun) / sunR.
+            float eScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp);
+            float moonR = glm::mix(moon.radius, moon.realRadius, eScale);
+            float sunR  = glm::mix(sun.radius,  sun.realRadius,  eScale);
+            float moonSunDist = (float)glm::distance(moon.currentPosition, sun.currentPosition);
+            float targetZoom = moonR * moonSunDist / sunR * 0.97f; // 0.97 → 달을 아주 살짝 크게 해 완전히 가림
+            targetZoom = std::max(targetZoom, moonR + 0.05f);      // 달 표면에 파묻히지 않도록 최소 여백
             
             // =========================================================
             // 🚀 [핵심 수정] perfectCamPos를 perfectCamOffset으로 변경!
@@ -1584,6 +1593,27 @@ protected:
         if (gearClicked) settingsOpen = !settingsOpen;
         ImGui::PopStyleColor(3);
         ImGui::End();
+
+        // =========================================================
+        // 0-b. 우측 하단 EXIT 버튼 (LOBBY/SIMULATION 공통) — 앱 자체를 종료한다.
+        //      메뉴의 플랫 사이파이 스타일을 따르되, 종료 의미로 붉은 톤을 쓴다.
+        // =========================================================
+        {
+            const float exitW = 96.0f, exitH = 38.0f;
+            ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width - exitW - 30.0f, swapChainExtent.height - exitH - 26.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(exitW + 20.0f, exitH + 20.0f), ImGuiCond_Always);
+            ImGui::Begin("ExitBtn", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.55f, 0.15f, 0.15f, 0.22f)); // 평소 투명한 붉은 톤
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.22f, 0.22f, 0.60f)); // 호버 시 채워짐
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 0.30f, 0.30f, 0.80f));
+            ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(0.90f, 0.40f, 0.40f, 0.85f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.5f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+            if (ImGui::Button("EXIT", ImVec2(exitW, exitH))) glfwSetWindowShouldClose(window, GLFW_TRUE);
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+            ImGui::End();
+        }
 
         applyLiveSettings();            // settings -> 기존 상태 동기화 (창이 닫혀 있어도 매 프레임)
         if (settingsOpen) drawSettingsWindow();
@@ -1727,12 +1757,6 @@ protected:
             // =========================================================
             ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
             ImGui::Begin("Information Panel", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-            
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.2f, 0.2f, 0.8f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.3f, 0.3f, 0.9f));
-            if (ImGui::Button("RETURN TO MAIN MENU", ImVec2(240.0f, 30.0f))) currentAppState = AppState::LOBBY; 
-            ImGui::PopStyleColor(2);
-            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
             if (selectedTargetType != -1) {
                 std::string targetName = "";
