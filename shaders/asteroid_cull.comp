@@ -73,8 +73,10 @@ void main() {
     // 2. 카메라와의 거리 계산 및 LOD 판별
     float dist = distance(worldPos, ubo.cameraPos);
     int lod = 2; // 기본 저화질
-    if (dist < 40.0) lod = 0;      // 최고화질
-    else if (dist < 80.0) lod = 1; // 중간화질
+    // 임계값을 넓혀 훨씬 많은 소행성이 실제 모델로 보이게 한다. LOD 메시는 전 인스턴스가
+    // 공유하므로 메모리는 늘지 않고, 정점 처리량만 늘어난다(프러스텀 컬링으로 상쇄 예정).
+    if (dist < 120.0) lod = 0;      // 최고화질(실제 모델)
+    else if (dist < 260.0) lod = 1; // 중간화질
 
     // 3. 12개의 바구니 중 어디로 들어갈지 번호 계산 (0 ~ 11)
     int type = ast.type;

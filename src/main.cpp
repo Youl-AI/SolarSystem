@@ -1472,6 +1472,9 @@ protected:
         }
         
         camera.smoothFollow(nextTarget, deltaTime, targetChanged);
+        // 로비(대기화면)에서는 카메라를 아주 천천히 자동 선회시켜 시네마틱한 배경 연출을 준다.
+        // (로비에선 마우스 조작이 비활성이라 사용자 입력과 충돌하지 않는다.)
+        if (currentAppState == AppState::LOBBY) camera.yaw += deltaTime * 4.0f;
         camera.update(deltaTime);
         // FOV 설정을 바꾸면 현재 화면에 즉시 반영한다. 설정을 바꾼 순간에는 텔레스코프 줌을 취소하고
         // 새 기본 시야각으로 스냅한다(스펙: "현재 줌 상태를 그에 맞춰 재계산"). 그 외 프레임에는
@@ -1594,38 +1597,81 @@ protected:
 
         if (currentAppState == AppState::LOBBY) {
             // ---------------------------------------------------------
-            // ① 대기 화면(LOBBY) 상태의 UI 연출 (기존 완벽 복구!)
+            // ① 대기 화면(LOBBY): 우주 시뮬레이션 스타일 HUD
+            // 박스형 카드 대신, 살아있는 씬 위에 은은한 그라데이션 스크림 띠 +
+            // 얇은 HUD 액센트 라인 + 플랫한 사이파이 버튼으로 구성한다.
             // ---------------------------------------------------------
-            ImGui::SetNextWindowPos(ImVec2(swapChainExtent.width * 0.5f - 200.0f, swapChainExtent.height * 0.5f - 150.0f), ImGuiCond_Always);
-            ImGui::SetNextWindowSize(ImVec2(400.0f, 250.0f), ImGuiCond_Always);
-            
-            ImGui::Begin("Main Menu", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBackground);
-            
-            ImGui::Spacing(); ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.8f, 1.0f, 1.0f)); 
-            ImGui::SetWindowFontScale(2.0f); 
-            TextCentered("VULKAN ENGINE");
+            float cx = swapChainExtent.width * 0.5f;
+            float cy = swapChainExtent.height * 0.5f;
+
+            // 1) 가독성용 수평 그라데이션 스크림 (배경 드로리스트, 위아래로 부드럽게 페이드 → 하드 엣지 없음)
+            ImDrawList* bgList = ImGui::GetBackgroundDrawList();
+            const float bandH = 175.0f;
+            const ImU32 scrimDark = IM_COL32(3, 6, 12, 150);
+            const ImU32 scrimClear = IM_COL32(3, 6, 12, 0);
+            bgList->AddRectFilledMultiColor(ImVec2(0.0f, cy - bandH), ImVec2((float)swapChainExtent.width, cy), scrimClear, scrimClear, scrimDark, scrimDark);
+            bgList->AddRectFilledMultiColor(ImVec2(0.0f, cy), ImVec2((float)swapChainExtent.width, cy + bandH), scrimDark, scrimDark, scrimClear, scrimClear);
+
+            // 2) 투명·오토리사이즈 창을 화면 중앙(피벗 0.5,0.5)에 → 빈 여백 없이 콘텐츠만
+            ImGui::SetNextWindowPos(ImVec2(cx, cy), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::Begin("Main Menu", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_AlwaysAutoResize);
+
+            // 타이틀
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.93f, 1.0f, 1.0f));
+            ImGui::SetWindowFontScale(2.3f);
+            TextCentered("SOLAR SYSTEM ENGINE");
+            ImGui::SetWindowFontScale(1.0f);
             ImGui::PopStyleColor();
-            
-            ImGui::SetWindowFontScale(1.2f);
-            TextCentered("Solar System Architecture v1.0");
-            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing(); ImGui::Spacing();
 
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.4f, 0.2f, 0.8f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.7f, 0.3f, 0.9f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.9f, 0.4f, 1.0f));
-            
-            ImGui::SetCursorPosX(125.0f); 
-            if (ImGui::Button("LAUNCH MISSION", ImVec2(150.0f, 45.0f))) {
-                currentAppState = AppState::SIMULATION; // 누르면 시뮬레이션으로 진입!
+            // 타이틀 밑 HUD 액센트 라인 (타이틀 폭에 맞춰 가운데, 시안 + 양 끝 캡)
+            {
+                ImVec2 rmin = ImGui::GetItemRectMin();
+                ImVec2 rmax = ImGui::GetItemRectMax();
+                float lineY = rmax.y + 5.0f;
+                float lineCx = (rmin.x + rmax.x) * 0.5f;
+                float lineHalf = (rmax.x - rmin.x) * 0.5f;
+                ImDrawList* wl = ImGui::GetWindowDrawList();
+                wl->AddLine(ImVec2(lineCx - lineHalf, lineY), ImVec2(lineCx + lineHalf, lineY), IM_COL32(70, 150, 230, 200), 1.5f);
+                wl->AddCircleFilled(ImVec2(lineCx - lineHalf, lineY), 2.5f, IM_COL32(120, 200, 255, 230));
+                wl->AddCircleFilled(ImVec2(lineCx + lineHalf, lineY), 2.5f, IM_COL32(120, 200, 255, 230));
             }
-            ImGui::PopStyleColor(3);
 
-            ImGui::Spacing(); ImGui::Spacing();
-            ImGui::SetWindowFontScale(0.9f);
-            TextCentered("Press LAUNCH to entry universe space.");
+            ImGui::Dummy(ImVec2(0.0f, 12.0f));
+            // 태그라인 (자간을 넓힌 HUD 느낌으로 공백 삽입)
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.62f, 0.72f, 1.0f));
+            ImGui::SetWindowFontScale(0.95f);
+            TextCentered("R E A L - T I M E   V U L K A N   S I M U L A T I O N     v2.0");
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::PopStyleColor();
+
+            ImGui::Dummy(ImVec2(0.0f, 24.0f));
+
+            // 플랫 사이파이 버튼: 평소 투명한 시안 + 테두리, 호버 시 채워짐
+            const float btnW = 270.0f, btnH = 46.0f;
+            ImGui::SetCursorPosX((ImGui::GetWindowSize().x - btnW) * 0.5f);
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.10f, 0.45f, 0.75f, 0.22f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.60f, 0.95f, 0.55f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.30f, 0.70f, 1.00f, 0.75f));
+            ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(0.45f, 0.75f, 1.0f, 0.9f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.5f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+            ImGui::SetWindowFontScale(1.15f);
+            if (ImGui::Button("LAUNCH  MISSION", ImVec2(btnW, btnH))) {
+                currentAppState = AppState::SIMULATION; // 시뮬레이션 진입
+            }
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.5f, 0.58f, 1.0f));
+            ImGui::SetWindowFontScale(0.85f);
+            TextCentered("Press LAUNCH to enter the simulation");
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::PopStyleColor();
+
             ImGui::End();
-        } 
+        }
         else if (currentAppState == AppState::SIMULATION) {
             // ---------------------------------------------------------
             // ② 인게임 시뮬레이션(SIMULATION) 상태의 UI 연출

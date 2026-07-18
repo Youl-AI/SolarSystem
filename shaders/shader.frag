@@ -174,22 +174,30 @@ void main() {
         float n2 = fbm((volumePos + warpOffset) * 2.5 - flowOffset * 2.0);
         float chaoticNoise = (n1 * 0.7 + n2 * 0.3);
         
-        float flamesShape = pow(chaoticNoise, 3.0) * 3.0; 
-        float flameRadius = 1.01 + flamesShape * 0.15; 
-        
+        // 가느다란 필라멘트 디테일: 더 높은 주파수 노이즈로 불꽃 가장자리를 잘게 쪼갠다.
+        float fineDetail = fbm((volumePos + warpOffset) * 5.0 - flowOffset * 3.0);
+
+        float flamesShape = pow(chaoticNoise, 3.0) * 3.0;
+        flamesShape *= (0.7 + 0.6 * fineDetail);   // 필라멘트 변조
+        float flameRadius = 1.01 + flamesShape * 0.15;
+
         float flames = smoothstep(flameRadius, 0.98, r);
         float edgeFade = smoothstep(2.0, 1.8, r);
-        
+
         float alpha = flames * edgeFade;
         if (alpha < 0.005) discard;
-        
+
         vec3 colorInner = vec3(1.0, 0.8, 0.1);
         vec3 colorOuter = vec3(0.9, 0.1, 0.0);
         vec3 finalColor = mix(colorOuter, colorInner, smoothstep(1.2, 0.95, r));
-        
-        finalColor += vec3(1.0, 0.4, 0.0) * flamesShape * smoothstep(1.15, 0.95, r);
-        
-        writeOut(vec4(finalColor * 2.5, alpha));
+
+        finalColor += vec3(1.0, 0.45, 0.05) * flamesShape * smoothstep(1.15, 0.95, r);
+
+        // 가장 강한 불꽃 끝을 백열(하양)로 처리해 온도차를 살린다.
+        float hotTip = smoothstep(0.7, 1.6, flamesShape);
+        finalColor += vec3(1.0, 0.95, 0.75) * hotTip * smoothstep(1.1, 0.96, r);
+
+        writeOut(vec4(finalColor * 2.5, min(alpha, 1.0)));
         return;
     }
     else if (fragObjectType == 0 || fragObjectType == 9) { 

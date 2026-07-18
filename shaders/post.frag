@@ -7,15 +7,25 @@ layout(location = 0) out vec4 outColor;
 
 layout(push_constant) uniform Push { float exposure; } push;
 
+// [ACES Filmic Tone Mapping] Narkowicz 근사식. Reinhard보다 하이라이트 롤오프가
+// 부드럽고 대비/채도가 영화적으로 살아난다.
+vec3 acesFilmic(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
 void main() {
     vec3 color = texture(texColor, fragTexCoord).rgb;
     vec3 bright = texture(texBright, fragTexCoord).rgb;
-    
+
     // HDR 색상 합성
     vec3 hdrColor = (color + bright) * push.exposure;
-    
-    // [Reinhard Tone Mapping] 현실의 눈부신 빛을 모니터가 표현할 수 있는 색상으로 깎아냅니다.
-    vec3 mapped = hdrColor / (hdrColor + vec3(1.0));
-    
+
+    vec3 mapped = acesFilmic(hdrColor);
+
     outColor = vec4(mapped, 1.0);
 }
