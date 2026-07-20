@@ -19,7 +19,9 @@ layout(binding = 3) uniform sampler2D texSpecular;
 layout(binding = 4) uniform sampler2D texNormalDisp;
 layout(binding = 5) uniform sampler2D texClouds;
 layout(binding = 6) uniform samplerCube skyboxTex;
-layout(binding = 7) uniform sampler2D shadowMap; 
+// sampler2DShadow: 샘플러에 compareEnable이 켜져 있어, 읽으면 깊이가 아니라 '비교 결과'가 나온다.
+// 하드웨어가 비교 후 2x2 보간을 해주므로 탭 하나만으로도 경계가 부드럽다.
+layout(binding = 7) uniform sampler2DShadow shadowMap;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outBrightColor; 
@@ -63,12 +65,16 @@ float ShadowMapOcclusion(vec4 fragPosLightSpace, vec3 N, vec3 L) {
     // 빛이 비스듬할수록 깊이 기울기가 커져 여드름(acne)이 생기므로 바이어스를 키운다.
     float bias = max(0.0004 * (1.0 - dot(N, L)), 0.00005);
 
-    // 3x3 PCF로 계단현상을 부드럽게. 조기 반환이 있는 비균일 흐름이라 LOD를 명시한다.
-    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+    // 3x3 탭 PCF. 탭마다 하드웨어가 2x2 비교 보간을 해주므로 실질 4x4 커널이 된다.
+    // 조기 반환이 있는 비균일 흐름이라 암시적 미분을 못 쓰고 LOD를 명시한다.
+    // 탭 간격을 1.5텍셀로 벌려 4096에서도 반그림자 폭이 눈에 보이게 유지한다.
+    // (실제로 이오의 그림자는 태양이 점광원이 아니라 가장자리가 수백 km에 걸쳐 흐리다)
+    vec2 texel = 1.5 / vec2(textureSize(shadowMap, 0));
+    float ref = proj.z - bias;
     float occ = 0.0;
     for (int x = -1; x <= 1; ++x)
         for (int y = -1; y <= 1; ++y)
-            occ += (proj.z - bias > textureLod(shadowMap, uv + vec2(x, y) * texel, 0.0).r) ? 1.0 : 0.0;
+            occ += textureLod(shadowMap, vec3(uv + vec2(x, y) * texel, ref), 0.0);
     return occ / 9.0;
 }
 

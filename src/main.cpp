@@ -294,6 +294,10 @@ private:
     VkPipeline postPipeline;
     VkDescriptorSet postDescriptorSet;
 
+    // 셰도우 맵 한 변의 길이. 이 한 장이 행성계 전체(가장 바깥 위성 궤도까지)를 덮어야 하므로
+    // 정작 본체에 돌아가는 텍셀은 얼마 안 된다. 목성계는 칼리스토 궤도(5.4)가 기준이라
+    // 2048일 때 목성 본체가 270텍셀뿐이었고, 그림자 경계가 사각형으로 보였다.
+    static constexpr uint32_t SHADOW_DIM = 4096;
     VkImage shadowImage;
     VkDeviceMemory shadowMemory;
     VkImageView shadowView;
@@ -804,25 +808,25 @@ protected:
         sun = createPlanet("Sun", 4, 1.80f, 0.0f, 0.0f, 0.0f, 0.9f, 7.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/sun.jpg", "", "", "", "");
         
         // 1. 내행성 (수~화)
-        planets.push_back(createPlanet("Mercury", 0, 0.11f, 3.50f, 15.00f, 0.205f, 0.43f, 0.03f, 7.0f, 77.0f, 48.0f, 120.0f, 45.0f, false, "textures/planets/mercury.jpg", "", "", "", ""));  // index 0
-        planets.push_back(createPlanet("Venus", 0, 0.19f, 4.80f, 11.00f, 0.006f, 0.1f, 177.36f, 3.4f, 131.0f, 76.0f, 30.0f, 100.0f, true, "textures/planets/venus.jpg", "", "", "", "textures/planets/venus_atmosphere.jpg"));  // index 1
-        planets.push_back(createPlanet("Earth", 0, 0.20f, 6.00f, 10.00f, 0.016f, 25.0f, 23.44f, 0.0f, 102.0f, 0.0f, 200.0f, 0.0f, true, "textures/planets/earth.jpg", "textures/planets/earth_night.jpg", "textures/planets/earth_specular.jpg", "textures/planets/earth_normal.jpg", "textures/planets/earth_clouds.jpg"));  // index 2
-        planets.push_back(createPlanet("Mars", 0, 0.14f, 7.50f, 8.50f, 0.093f, 24.3f, 25.19f, 1.85f, 336.0f, 49.0f, 310.0f, 210.0f, false, "textures/planets/mars.jpg", "", "", "", ""));  // index 3
+        planets.push_back(createPlanet("Mercury", 0, 0.11f, 3.50f, 15.00f, 0.205f, 0.43f, 0.03f, 7.0f, 77.0f, 48.0f, 120.0f, 45.0f, false, "textures/planets/8k_mercury.jpg", "", "", "", ""));  // index 0
+        planets.push_back(createPlanet("Venus", 0, 0.19f, 4.80f, 11.00f, 0.006f, 0.1f, 177.36f, 3.4f, 131.0f, 76.0f, 30.0f, 100.0f, true, "textures/planets/8k_venus_surface.jpg", "", "", "", "textures/planets/venus_atmosphere.jpg"));  // index 1
+        planets.push_back(createPlanet("Earth", 0, 0.20f, 6.00f, 10.00f, 0.016f, 25.0f, 23.44f, 0.0f, 102.0f, 0.0f, 200.0f, 0.0f, true, "textures/planets/8k_earth.jpg", "textures/planets/8k_earth_nightmap.jpg", "textures/planets/8k_earth_specular.png", "textures/planets/8k_earth_normal.png", "textures/planets/8k_earth_clouds.jpg"));  // index 2
+        planets.push_back(createPlanet("Mars", 0, 0.14f, 7.50f, 8.50f, 0.093f, 24.3f, 25.19f, 1.85f, 336.0f, 49.0f, 310.0f, 210.0f, false, "textures/planets/8k_mars.jpg", "", "", "", ""));  // index 3
         
         // 2. 소행성대 (세레스가 11.0에서 기준선 역할을 합니다)
         planets.push_back(createPlanet("Ceres", 1, 0.04f, 11.00f, 6.50f, 0.076f, 66.6f, 4.0f, 10.6f, 73.0f, 80.0f, 0.0f, 0.0f, false, "textures/asteroids/ceres.jpg", "", "", "", ""));  // index 4
         
         // 3. 외행성 (목성계 확장에 따른 연쇄 이동 적용)
-        planets.push_back(createPlanet("Jupiter", 9, 0.80f, 22.00f, 4.50f, 0.048f, 60.6f, 3.13f, 1.3f, 14.0f, 100.0f, 45.0f, 30.0f, false, "textures/planets/jupiter.jpg", "", "", "", "")); // index 5 (위성 부모)
+        planets.push_back(createPlanet("Jupiter", 9, 0.80f, 22.00f, 4.50f, 0.048f, 60.6f, 3.13f, 1.3f, 14.0f, 100.0f, 45.0f, 30.0f, false, "textures/planets/8k_jupiter.jpg", "", "", "", "")); // index 5 (위성 부모)
         // 마지막 인자(clouds 슬롯)에 고리 텍스처를 넣는다. 가스 행성은 구름 맵을 쓰지 않으므로
         // 이 슬롯이 비어 있고, 셰이더가 여기서 고리 밀도를 읽어 본체에 그림자를 드리운다.
-        planets.push_back(createPlanet("Saturn", 9, 0.70f, 34.00f, 3.30f, 0.056f, 56.0f, 26.73f, 2.49f, 92.0f, 113.0f, 150.0f, 120.0f, false, "textures/planets/saturn.jpg", "", "", "", "textures/planets/saturn_ring.png"));  // index 6 (타이탄 부모)
+        planets.push_back(createPlanet("Saturn", 9, 0.70f, 34.00f, 3.30f, 0.056f, 56.0f, 26.73f, 2.49f, 92.0f, 113.0f, 150.0f, 120.0f, false, "textures/planets/8k_saturn.jpg", "", "", "", "textures/planets/8k_saturn_ring_alpha.png"));  // index 6 (타이탄 부모)
         planets.push_back(createPlanet("Uranus", 9, 0.40f, 48.00f, 2.50f, 0.046f, 34.8f, 97.77f, 0.77f, 170.0f, 74.0f, 280.0f, 250.0f, false, "textures/planets/uranus.jpg", "", "", "", ""));  // index 7
         planets.push_back(createPlanet("Neptune", 9, 0.39f, 62.00f, 2.00f, 0.009f, 37.2f, 28.32f, 1.77f, 44.0f, 131.0f, 90.0f, 80.0f, false, "textures/planets/neptune.jpg", "", "", "", ""));  // index 8
         
         // 4. 달 및 토성 고리
-        moon = createPlanet("Moon", 1, 0.08f, 0.75f, 45.0f, 0.054f, 45.0f, 6.68f, 5.14f, 318.0f, 125.0f, 45.0f, 0.0f, false, "textures/moons/moon.jpg", "", "", "textures/moons/moon_normal.jpg", "");
-        saturnRing = createPlanet("SaturnRing", 5, 1.60f, 0.0f, 0.0f, 0.0f, 0.0f, 26.73f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/planets/saturn_ring.png", "", "", "", "");
+        moon = createPlanet("Moon", 1, 0.08f, 0.75f, 45.0f, 0.054f, 45.0f, 6.68f, 5.14f, 318.0f, 125.0f, 45.0f, 0.0f, false, "textures/moons/8k_moon.jpg", "", "", "textures/moons/moon_normal.jpg", "");
+        saturnRing = createPlanet("SaturnRing", 5, 1.60f, 0.0f, 0.0f, 0.0f, 0.0f, 26.73f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/planets/8k_saturn_ring_alpha.png", "", "", "", "");
         
         // 5. 카이퍼 벨트 및 왜소행성 (외행성들이 밀려난 만큼, 바깥쪽 영역(75~100)으로 완벽하게 밀려납니다)
         planets.push_back(createPlanet("Pluto", 1, 0.07f, 75.00f, 1.70f, 0.248f, 3.9f, 122.5f, 17.1f, 113.8f, 110.0f, 90.0f, 0.0f, false, "textures/asteroids/pluto.jpg", "", "", "", "")); // index 9
@@ -1182,7 +1186,7 @@ protected:
     void createShadowResources() {
         VkFormat depthFormat = findDepthFormat(); 
         VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = 2048; iInfo.extent.height = 2048;
+        iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = SHADOW_DIM; iInfo.extent.height = SHADOW_DIM;
         iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1;
         iInfo.format = depthFormat; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         iInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -1206,6 +1210,12 @@ protected:
         sInfo.magFilter = VK_FILTER_LINEAR; sInfo.minFilter = VK_FILTER_LINEAR;
         sInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; sInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; sInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
         sInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; 
+        // 하드웨어 비교 샘플러. 이게 없으면 깊이 값을 보간한 뒤 셰이더가 직접 비교하게 되어
+        // 탭 하나가 0 아니면 1만 내놓고, 결국 경계가 텍셀 단위 사각형으로 남는다.
+        // compareEnable을 켜면 GPU가 비교를 먼저 하고 그 결과를 2x2 보간하므로 중간값이 나온다.
+        // 셰이더 판정이 "내 깊이 > 저장된 깊이면 가려짐"이라 GREATER를 쓴다.
+        sInfo.compareEnable = VK_TRUE;
+        sInfo.compareOp = VK_COMPARE_OP_GREATER;
         vkCreateSampler(device, &sInfo, nullptr, &shadowSampler);
         
         VkAttachmentDescription attachment{};
@@ -1233,7 +1243,7 @@ protected:
         
         VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fbInfo.renderPass = shadowRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &shadowView;
-        fbInfo.width = 2048; fbInfo.height = 2048; fbInfo.layers = 1;
+        fbInfo.width = SHADOW_DIM; fbInfo.height = SHADOW_DIM; fbInfo.layers = 1;
         vkCreateFramebuffer(device, &fbInfo, nullptr, &shadowFramebuffer);
     }
 
@@ -1255,8 +1265,8 @@ protected:
         
         VkPipelineInputAssemblyStateCreateInfo iA{}; iA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; iA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         
-        VkViewport vp{}; vp.width = 2048.0f; vp.height = 2048.0f; vp.maxDepth = 1.0f;
-        VkRect2D sc{}; sc.extent = {2048, 2048};
+        VkViewport vp{}; vp.width = (float)SHADOW_DIM; vp.height = (float)SHADOW_DIM; vp.maxDepth = 1.0f;
+        VkRect2D sc{}; sc.extent = {SHADOW_DIM, SHADOW_DIM};
         VkPipelineViewportStateCreateInfo vpS{}; vpS.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vpS.viewportCount = 1; vpS.pViewports = &vp; vpS.scissorCount = 1; vpS.pScissors = &sc;
         
         VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
@@ -2221,7 +2231,7 @@ protected:
         // 1. 섀도우 맵핑 패스
         VkRenderPassBeginInfo shadowPassInfo{}; shadowPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         shadowPassInfo.renderPass = shadowRenderPass; shadowPassInfo.framebuffer = shadowFramebuffer;
-        shadowPassInfo.renderArea.offset = {0, 0}; shadowPassInfo.renderArea.extent = {2048, 2048}; 
+        shadowPassInfo.renderArea.offset = {0, 0}; shadowPassInfo.renderArea.extent = {SHADOW_DIM, SHADOW_DIM}; 
         VkClearValue depthClear; depthClear.depthStencil = {1.0f, 0};
         shadowPassInfo.clearValueCount = 1; shadowPassInfo.pClearValues = &depthClear;
 
