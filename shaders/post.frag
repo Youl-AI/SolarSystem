@@ -18,12 +18,16 @@ vec3 acesFilmic(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+// 밉체인 블룸은 6단계의 번짐을 전부 더해 쌓기 때문에, 기존의 고정 반경 가우시안 한 장보다
+// 총 광량이 훨씬 커진다(태양이 눈에 띄게 밝아졌던 이유). 여기서 한 번 눌러 예전 밝기에 맞춘다.
+const float kBloomStrength = 0.55;
+
 void main() {
     vec3 color = texture(texColor, fragTexCoord).rgb;
     vec3 bright = texture(texBright, fragTexCoord).rgb;
 
     // HDR 색상 합성
-    vec3 hdrColor = (color + bright) * push.exposure;
+    vec3 hdrColor = (color + bright * kBloomStrength) * push.exposure;
 
     vec3 mapped = acesFilmic(hdrColor);
 

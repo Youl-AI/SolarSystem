@@ -265,15 +265,29 @@ private:
     VkFramebuffer offscreenFramebuffer;
     VkSampler offscreenSampler;
 
-    VkImage blurImages[2];
-    VkDeviceMemory blurMemories[2];
-    VkImageView blurViews[2];
-    VkRenderPass blurRenderPass;
-    VkFramebuffer blurFramebuffers[2];
+    // ── 밉체인 블룸 ──────────────────────────────────────────────────────
+    // 밉 단계를 내려가며 흐리고(down), 다시 올라오며 더한다(up). 여러 해상도의 번짐이
+    // 겹쳐 쌓여 고정 반경 가우시안보다 넓고 부드러운 글로우가 나오면서, 대부분의 작업이
+    // 저해상도에서 일어나 비용도 더 싸다.
+    static const int BLOOM_MAX_MIPS = 8;
+    int bloomMipCount = 0;
+    VkImage bloomImage = VK_NULL_HANDLE;
+    VkDeviceMemory bloomMem = VK_NULL_HANDLE;
+    VkImageView bloomMipViews[BLOOM_MAX_MIPS]{};      // 각 밉 한 단계만 보는 뷰(샘플링/렌더 타겟 겸용)
+    VkFramebuffer bloomFramebuffers[BLOOM_MAX_MIPS]{};
+    VkExtent2D bloomMipExtents[BLOOM_MAX_MIPS]{};
+    // 다운은 덮어쓰기(DONT_CARE), 업은 기존 내용에 더해야 하므로 보존(LOAD). 두 렌더패스는
+    // 어태치먼트 포맷·샘플수가 같아 호환되므로 프레임버퍼는 한 벌만 있으면 된다.
+    VkRenderPass blurRenderPass;   // 다운샘플용 (기존 이름 유지)
+    VkRenderPass bloomUpPass = VK_NULL_HANDLE;
+    VkPipeline bloomDownPipeline = VK_NULL_HANDLE;
+    VkPipeline bloomUpPipeline = VK_NULL_HANDLE;
+    VkDescriptorSet bloomSrcSet = VK_NULL_HANDLE;            // offscreenBright를 읽는 세트
+    VkDescriptorSet bloomMipSets[BLOOM_MAX_MIPS]{};          // 각 밉을 읽는 세트
+
+    struct BloomPush { glm::vec2 srcTexel; float radius; };
     VkDescriptorSetLayout blurDescriptorSetLayout;
     VkPipelineLayout blurPipelineLayout;
-    VkPipeline blurPipeline;
-    VkDescriptorSet blurDescriptorSets[3];
 
     VkDescriptorSetLayout postDescriptorSetLayout;
     VkPipelineLayout postPipelineLayout;
@@ -499,12 +513,12 @@ protected:
     // 오프스크린/블러 이미지·프레임버퍼 전용 파괴 헬퍼. recreateSwapChain()과
     // recreateOffscreenAndBlur() 양쪽에서 재사용한다(Task 6의 MSAA 재생성도 재사용 예정).
     void destroyOffscreenAndBlurResources() {
-        for (int i = 0; i < 2; i++) {
-            vkDestroyFramebuffer(device, blurFramebuffers[i], nullptr);
-            vkDestroyImageView(device, blurViews[i], nullptr);
-            vkDestroyImage(device, blurImages[i], nullptr);
-            vkFreeMemory(device, blurMemories[i], nullptr);
+        for (int i = 0; i < bloomMipCount; i++) {
+            vkDestroyFramebuffer(device, bloomFramebuffers[i], nullptr);
+            vkDestroyImageView(device, bloomMipViews[i], nullptr);
         }
+        vkDestroyImage(device, bloomImage, nullptr);
+        vkFreeMemory(device, bloomMem, nullptr);
         vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr);
         vkDestroyImageView(device, offscreenColorView, nullptr); vkDestroyImage(device, offscreenColorImage, nullptr); vkFreeMemory(device, offscreenColorMem, nullptr);
         vkDestroyImageView(device, offscreenBrightView, nullptr); vkDestroyImage(device, offscreenBrightImage, nullptr); vkFreeMemory(device, offscreenBrightMem, nullptr);
@@ -1332,21 +1346,47 @@ protected:
 
     void createBlurImages() {
         VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-        auto makeImg = [&](VkImage& img, VkDeviceMemory& mem, VkImageView& view) {
-            VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = blurExtent.width; iInfo.extent.height = blurExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = colorFormat; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            vkCreateImage(device, &iInfo, nullptr, &img);
-            VkMemoryRequirements mReqs; vkGetImageMemoryRequirements(device, img, &mReqs);
-            VkMemoryAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; aInfo.allocationSize = mReqs.size; aInfo.memoryTypeIndex = findMemoryType(mReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            vkAllocateMemory(device, &aInfo, nullptr, &mem); vkBindImageMemory(device, img, mem, 0);
-            VkImageViewCreateInfo vInfo{}; vInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vInfo.image = img; vInfo.viewType = VK_IMAGE_VIEW_TYPE_2D; vInfo.format = colorFormat; vInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; vInfo.subresourceRange.baseMipLevel = 0; vInfo.subresourceRange.levelCount = 1; vInfo.subresourceRange.baseArrayLayer = 0; vInfo.subresourceRange.layerCount = 1;
-            vkCreateImageView(device, &vInfo, nullptr, &view);
-        };
 
-        for(int i = 0; i < 2; i++) makeImg(blurImages[i], blurMemories[i], blurViews[i]);
+        // 밉 단계 수: 가장 작은 변이 8픽셀 밑으로 내려가지 않을 때까지.
+        bloomMipCount = 1;
+        while (bloomMipCount < BLOOM_MAX_MIPS
+               && (blurExtent.width >> bloomMipCount) >= 8
+               && (blurExtent.height >> bloomMipCount) >= 8) {
+            bloomMipCount++;
+        }
+        for (int i = 0; i < bloomMipCount; ++i) {
+            bloomMipExtents[i] = { std::max(1u, blurExtent.width >> i), std::max(1u, blurExtent.height >> i) };
+        }
 
-        for(int i = 0; i < 2; i++) {
-            VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = blurRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &blurViews[i]; fbInfo.width = blurExtent.width; fbInfo.height = blurExtent.height; fbInfo.layers = 1;
-            vkCreateFramebuffer(device, &fbInfo, nullptr, &blurFramebuffers[i]);
+        VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D;
+        iInfo.extent = { blurExtent.width, blurExtent.height, 1 };
+        iInfo.mipLevels = bloomMipCount; iInfo.arrayLayers = 1; iInfo.format = colorFormat;
+        iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        iInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCreateImage(device, &iInfo, nullptr, &bloomImage);
+
+        VkMemoryRequirements mReqs; vkGetImageMemoryRequirements(device, bloomImage, &mReqs);
+        VkMemoryAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; aInfo.allocationSize = mReqs.size;
+        aInfo.memoryTypeIndex = findMemoryType(mReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkAllocateMemory(device, &aInfo, nullptr, &bloomMem);
+        vkBindImageMemory(device, bloomImage, bloomMem, 0);
+
+        // 밉마다 '그 한 단계만' 보는 뷰를 만든다. 렌더 타겟으로도, 샘플링 소스로도 쓴다.
+        // 뷰가 한 단계만 덮으므로 레이아웃 전환도 그 밉에만 적용되어, 같은 이미지의
+        // 다른 밉을 읽으면서 이 밉에 그리는 것이 안전하다.
+        for (int i = 0; i < bloomMipCount; ++i) {
+            VkImageViewCreateInfo vInfo{}; vInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            vInfo.image = bloomImage; vInfo.viewType = VK_IMAGE_VIEW_TYPE_2D; vInfo.format = colorFormat;
+            vInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            vInfo.subresourceRange.baseMipLevel = i; vInfo.subresourceRange.levelCount = 1;
+            vInfo.subresourceRange.baseArrayLayer = 0; vInfo.subresourceRange.layerCount = 1;
+            vkCreateImageView(device, &vInfo, nullptr, &bloomMipViews[i]);
+
+            VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            fbInfo.renderPass = blurRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &bloomMipViews[i];
+            fbInfo.width = bloomMipExtents[i].width; fbInfo.height = bloomMipExtents[i].height; fbInfo.layers = 1;
+            vkCreateFramebuffer(device, &fbInfo, nullptr, &bloomFramebuffers[i]);
         }
     }
 
@@ -1357,22 +1397,46 @@ protected:
         VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; subpass.colorAttachmentCount = 1; subpass.pColorAttachments = &colorRef;
 
         std::array<VkSubpassDependency, 2> deps{};
-        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0; deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL; deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        // 업샘플 패스는 loadOp=LOAD로 어태치먼트를 '읽으므로' 읽기 접근도 열어야 한다.
+        // 렌더패스 호환성 판정에는 서브패스 의존성도 포함되므로, 프레임버퍼를 두 패스가
+        // 공유하려면 양쪽 마스크가 같아야 한다. 다운샘플에는 읽기가 없지만 허용해도 무해하다.
+        const VkAccessFlags kColorRW = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0; deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[0].dstAccessMask = kColorRW;
+        deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL; deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[1].srcAccessMask = kColorRW; deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
         VkRenderPassCreateInfo rpInfo{}; rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpInfo.attachmentCount = 1; rpInfo.pAttachments = &att; rpInfo.subpassCount = 1; rpInfo.pSubpasses = &subpass; rpInfo.dependencyCount = 2; rpInfo.pDependencies = deps.data();
         vkCreateRenderPass(device, &rpInfo, nullptr, &blurRenderPass);
+
+        // 업샘플 패스: 이미 그려진 밉 위에 '더해야' 하므로 기존 내용을 보존한다.
+        // (다운샘플 패스와 어태치먼트 포맷·샘플수가 같아 프레임버퍼를 공유할 수 있다)
+        VkAttachmentDescription attUp = att;
+        attUp.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attUp.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        // 의존성은 위에서 두 패스가 같도록 맞춰뒀다(프레임버퍼 공유 조건).
+        VkRenderPassCreateInfo rpUp = rpInfo; rpUp.pAttachments = &attUp;
+        vkCreateRenderPass(device, &rpUp, nullptr, &bloomUpPass);
 
         createBlurImages();
     }
 
     void updateBlurDescriptorSets() {
         auto mI = [&](VkImageView v){ VkDescriptorImageInfo i{}; i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; i.imageView = v; i.sampler = offscreenSampler; return i; };
-        VkDescriptorImageInfo i0 = mI(offscreenBrightView); VkDescriptorImageInfo i1 = mI(blurViews[0]); VkDescriptorImageInfo i2 = mI(blurViews[1]);
-        std::array<VkWriteDescriptorSet, 3> wr{};
-        for(int i=0; i<3; i++) { wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = blurDescriptorSets[i]; wr[i].dstBinding = 0; wr[i].descriptorCount = 1; wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; }
-        wr[0].pImageInfo = &i0; wr[1].pImageInfo = &i1; wr[2].pImageInfo = &i2;
-        vkUpdateDescriptorSets(device, 3, wr.data(), 0, nullptr);
+
+        std::vector<VkDescriptorImageInfo> infos;
+        infos.reserve(bloomMipCount + 1);
+        infos.push_back(mI(offscreenBrightView));                 // 체인의 입력
+        for (int i = 0; i < bloomMipCount; ++i) infos.push_back(mI(bloomMipViews[i]));
+
+        std::vector<VkWriteDescriptorSet> wr(infos.size());
+        for (size_t i = 0; i < infos.size(); ++i) {
+            wr[i] = {}; wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wr[i].dstSet = (i == 0) ? bloomSrcSet : bloomMipSets[i - 1];
+            wr[i].dstBinding = 0; wr[i].descriptorCount = 1;
+            wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            wr[i].pImageInfo = &infos[i];
+        }
+        vkUpdateDescriptorSets(device, (uint32_t)wr.size(), wr.data(), 0, nullptr);
     }
 
     void createBlurPipeline() {
@@ -1380,18 +1444,29 @@ protected:
         VkDescriptorSetLayoutCreateInfo layInfo{}; layInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layInfo.bindingCount = 1; layInfo.pBindings = &b;
         vkCreateDescriptorSetLayout(device, &layInfo, nullptr, &blurDescriptorSetLayout);
 
-        VkDescriptorSetAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; aInfo.descriptorPool = descriptorPool; aInfo.descriptorSetCount = 3;
-        std::vector<VkDescriptorSetLayout> layouts(3, blurDescriptorSetLayout); aInfo.pSetLayouts = layouts.data();
-        vkAllocateDescriptorSets(device, &aInfo, blurDescriptorSets);
+        // 체인 입력용 1개 + 밉 단계마다 1개. 밉 수는 해상도에 따라 변하므로 최대치로 잡아둔다.
+        {
+            std::vector<VkDescriptorSetLayout> layouts(BLOOM_MAX_MIPS + 1, blurDescriptorSetLayout);
+            std::vector<VkDescriptorSet> sets(BLOOM_MAX_MIPS + 1);
+            VkDescriptorSetAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            aInfo.descriptorPool = descriptorPool; aInfo.descriptorSetCount = (uint32_t)layouts.size(); aInfo.pSetLayouts = layouts.data();
+            vkAllocateDescriptorSets(device, &aInfo, sets.data());
+            bloomSrcSet = sets[0];
+            for (int i = 0; i < BLOOM_MAX_MIPS; ++i) bloomMipSets[i] = sets[i + 1];
+        }
 
         updateBlurDescriptorSets();
 
-        VkPushConstantRange pc{}; pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pc.offset = 0; pc.size = sizeof(int);
+        VkPushConstantRange pc{}; pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pc.offset = 0; pc.size = sizeof(BloomPush);
         VkPipelineLayoutCreateInfo pLayInfo{}; pLayInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayInfo.setLayoutCount = 1; pLayInfo.pSetLayouts = &blurDescriptorSetLayout; pLayInfo.pushConstantRangeCount = 1; pLayInfo.pPushConstantRanges = &pc;
         vkCreatePipelineLayout(device, &pLayInfo, nullptr, &blurPipelineLayout);
 
-        auto vCode = readFile("shaders/post_vert.spv"); auto fCode = readFile("shaders/blur_frag.spv");
-        VkShaderModule vMod = createShaderModule(vCode); VkShaderModule fMod = createShaderModule(fCode);
+        auto vCode = readFile("shaders/post_vert.spv");
+        auto fDownCode = readFile("shaders/bloom_down_frag.spv");
+        auto fUpCode = readFile("shaders/bloom_up_frag.spv");
+        VkShaderModule vMod = createShaderModule(vCode);
+        VkShaderModule fMod = createShaderModule(fDownCode);
+        VkShaderModule fUpMod = createShaderModule(fUpCode);
         VkPipelineShaderStageCreateInfo vS{}; vS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vS.stage = VK_SHADER_STAGE_VERTEX_BIT; vS.module = vMod; vS.pName = "main";
         VkPipelineShaderStageCreateInfo fS{}; fS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fS.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fS.module = fMod; fS.pName = "main";
         VkPipelineShaderStageCreateInfo sS[] = {vS, fS};
@@ -1409,13 +1484,28 @@ protected:
         VkPipelineColorBlendStateCreateInfo cbS{}; cbS.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbS.attachmentCount = 1; cbS.pAttachments = &cbA;
 
         VkGraphicsPipelineCreateInfo pInfo{}; pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; pInfo.stageCount = 2; pInfo.pStages = sS; pInfo.pVertexInputState = &vI; pInfo.pInputAssemblyState = &iA; pInfo.pViewportState = &vpS; pInfo.pRasterizationState = &rs; pInfo.pMultisampleState = &ms; pInfo.pDepthStencilState = &ds; pInfo.pColorBlendState = &cbS; pInfo.layout = blurPipelineLayout; pInfo.renderPass = blurRenderPass; pInfo.pDynamicState = &dynamicStateBlur;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pInfo, nullptr, &blurPipeline);
-        vkDestroyShaderModule(device, fMod, nullptr); vkDestroyShaderModule(device, vMod, nullptr);
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pInfo, nullptr, &bloomDownPipeline);
+
+        // 업샘플은 같은 상태에 가산 블렌딩(ONE/ONE)만 켜서, 확대한 결과를 아래 밉에 더한다.
+        VkPipelineColorBlendAttachmentState cbAdd = cbA;
+        cbAdd.blendEnable = VK_TRUE;
+        cbAdd.srcColorBlendFactor = VK_BLEND_FACTOR_ONE; cbAdd.dstColorBlendFactor = VK_BLEND_FACTOR_ONE; cbAdd.colorBlendOp = VK_BLEND_OP_ADD;
+        cbAdd.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cbAdd.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cbAdd.alphaBlendOp = VK_BLEND_OP_ADD;
+        VkPipelineColorBlendStateCreateInfo cbAddS = cbS; cbAddS.pAttachments = &cbAdd;
+
+        VkPipelineShaderStageCreateInfo fUpS = fS; fUpS.module = fUpMod;
+        VkPipelineShaderStageCreateInfo sUp[] = {vS, fUpS};
+        VkGraphicsPipelineCreateInfo pUp = pInfo;
+        pUp.pStages = sUp; pUp.pColorBlendState = &cbAddS; pUp.renderPass = bloomUpPass;
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pUp, nullptr, &bloomUpPipeline);
+
+        vkDestroyShaderModule(device, fUpMod, nullptr); vkDestroyShaderModule(device, fMod, nullptr); vkDestroyShaderModule(device, vMod, nullptr);
     }
 
     void updatePostDescriptorSets() {
         auto mI = [&](VkImageView v){ VkDescriptorImageInfo i{}; i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; i.imageView = v; i.sampler = offscreenSampler; return i; };
-        VkDescriptorImageInfo cI = mI(offscreenColorView); VkDescriptorImageInfo brI = mI(blurViews[1]);
+        // 블룸 결과는 체인을 다 올라온 밉 0에 모여 있다.
+        VkDescriptorImageInfo cI = mI(offscreenColorView); VkDescriptorImageInfo brI = mI(bloomMipViews[0]);
         std::array<VkWriteDescriptorSet, 2> wr{};
         wr[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[0].dstSet = postDescriptorSet; wr[0].dstBinding = 0; wr[0].descriptorCount = 1; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[0].pImageInfo = &cI;
         wr[1] = wr[0]; wr[1].dstBinding = 1; wr[1].pImageInfo = &brI;
@@ -2325,17 +2415,36 @@ protected:
         vkCmdEndRenderPass(cb);
 
         tsMark(cb, 8);
-        bool horizontal = true; int blurAmount = 6;
-        for (int i = 0; i < blurAmount; i++) {
-            VkRenderPassBeginInfo blurPassInfo{}; blurPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; blurPassInfo.renderPass = blurRenderPass;
-            blurPassInfo.framebuffer = blurFramebuffers[horizontal ? 0 : 1]; blurPassInfo.renderArea.offset = {0, 0}; blurPassInfo.renderArea.extent = blurExtent;
-            VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}}; blurPassInfo.clearValueCount = 1; blurPassInfo.pClearValues = &clearColor;
-            vkCmdBeginRenderPass(cb, &blurPassInfo, VK_SUBPASS_CONTENTS_INLINE); setViewport(cb, blurExtent); vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline);
-            int setIndex = (i == 0) ? 0 : (horizontal ? 2 : 1);
-            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipelineLayout, 0, 1, &blurDescriptorSets[setIndex], 0, nullptr);
-            int horizInt = horizontal ? 1 : 0; vkCmdPushConstants(cb, blurPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(int), &horizInt);
-            vkCmdDraw(cb, 3, 1, 0, 0); vkCmdEndRenderPass(cb); horizontal = !horizontal; 
-        }
+        // ── 밉체인 블룸 ──────────────────────────────────────────────────
+        // 한 번의 draw = 전체화면 삼각형 하나. 렌더 타겟과 소스는 같은 이미지의 다른 밉이며,
+        // 각 뷰가 한 밉만 덮으므로 레이아웃 전환이 서로 침범하지 않는다.
+        auto bloomDraw = [&](VkRenderPass pass, VkPipeline pipe, int dstMip, VkDescriptorSet srcSet,
+                             VkExtent2D srcExtent, float radius) {
+            VkRenderPassBeginInfo bp{}; bp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            bp.renderPass = pass; bp.framebuffer = bloomFramebuffers[dstMip];
+            bp.renderArea.offset = {0, 0}; bp.renderArea.extent = bloomMipExtents[dstMip];
+            VkClearValue clear = {{{0.0f, 0.0f, 0.0f, 1.0f}}}; bp.clearValueCount = 1; bp.pClearValues = &clear;
+
+            vkCmdBeginRenderPass(cb, &bp, VK_SUBPASS_CONTENTS_INLINE);
+            setViewport(cb, bloomMipExtents[dstMip]);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipelineLayout, 0, 1, &srcSet, 0, nullptr);
+            BloomPush bpush{ glm::vec2(1.0f / (float)srcExtent.width, 1.0f / (float)srcExtent.height), radius };
+            vkCmdPushConstants(cb, blurPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(bpush), &bpush);
+            vkCmdDraw(cb, 3, 1, 0, 0);
+            vkCmdEndRenderPass(cb);
+        };
+
+        // 1) 내려가며 흐린다: 밝기 버퍼 -> 밉0, 밉0 -> 밉1, ...
+        bloomDraw(blurRenderPass, bloomDownPipeline, 0, bloomSrcSet, renderExtent, 0.0f);
+        for (int i = 1; i < bloomMipCount; ++i)
+            bloomDraw(blurRenderPass, bloomDownPipeline, i, bloomMipSets[i - 1], bloomMipExtents[i - 1], 0.0f);
+
+        // 2) 올라오며 더한다: 밉N-1 -> 밉N-2, ... -> 밉0.
+        // 여러 해상도의 번짐이 누적되어 넓고 부드러운 글로우가 만들어진다.
+        const float kBloomFilterRadius = 1.0f;
+        for (int i = bloomMipCount - 1; i > 0; --i)
+            bloomDraw(bloomUpPass, bloomUpPipeline, i - 1, bloomMipSets[i], bloomMipExtents[i], kBloomFilterRadius);
 
         VkRenderPassBeginInfo renderPassInfo{}; renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; renderPassInfo.renderPass = renderPass; renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
         renderPassInfo.renderArea.offset = {0, 0}; renderPassInfo.renderArea.extent = swapChainExtent;
@@ -2379,8 +2488,11 @@ protected:
         for (auto img : allImages) vkDestroyImage(device, img, nullptr);
         for (auto mem : allMemories) vkFreeMemory(device, mem, nullptr);
 
-        vkDestroyPipeline(device, blurPipeline, nullptr); vkDestroyPipelineLayout(device, blurPipelineLayout, nullptr); vkDestroyDescriptorSetLayout(device, blurDescriptorSetLayout, nullptr); vkDestroyRenderPass(device, blurRenderPass, nullptr);
-        for(int i=0; i<2; i++) { vkDestroyFramebuffer(device, blurFramebuffers[i], nullptr); vkDestroyImageView(device, blurViews[i], nullptr); vkDestroyImage(device, blurImages[i], nullptr); vkFreeMemory(device, blurMemories[i], nullptr); }
+        vkDestroyPipeline(device, bloomDownPipeline, nullptr); vkDestroyPipeline(device, bloomUpPipeline, nullptr);
+        vkDestroyPipelineLayout(device, blurPipelineLayout, nullptr); vkDestroyDescriptorSetLayout(device, blurDescriptorSetLayout, nullptr);
+        vkDestroyRenderPass(device, blurRenderPass, nullptr); vkDestroyRenderPass(device, bloomUpPass, nullptr);
+        for (int i = 0; i < bloomMipCount; i++) { vkDestroyFramebuffer(device, bloomFramebuffers[i], nullptr); vkDestroyImageView(device, bloomMipViews[i], nullptr); }
+        vkDestroyImage(device, bloomImage, nullptr); vkFreeMemory(device, bloomMem, nullptr);
         
         vkDestroyPipeline(device, postPipeline, nullptr); vkDestroyPipelineLayout(device, postPipelineLayout, nullptr); vkDestroyDescriptorSetLayout(device, postDescriptorSetLayout, nullptr); vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr); vkDestroyRenderPass(device, offscreenRenderPass, nullptr); vkDestroySampler(device, offscreenSampler, nullptr);
         vkDestroyImageView(device, offscreenColorView, nullptr); vkDestroyImage(device, offscreenColorImage, nullptr); vkFreeMemory(device, offscreenColorMem, nullptr);
