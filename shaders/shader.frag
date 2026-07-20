@@ -140,6 +140,104 @@ float SunDiscOcclusion(vec3 P) {
 // 조명에 곱할 밝기 계수(1 = 그늘 없음, 0 = 완전한 그늘).
 float SunVisibility(vec3 P) { return 1.0 - SunDiscOcclusion(P); }
 
+// ── 대기 산란 (레일리 단일 산란) ──────────────────────────────────────────
+// 지금까지 대기는 가장자리에 프레넬로 파란 띠를 칠하는 눈속임이었다. 그 방식은 빛이
+// 대기를 얼마나 통과했는지를 모르기 때문에, 노을의 붉은색을 따로 손으로 칠해줘야 했다.
+//
+// 여기서는 시선을 따라 대기 밀도를 적분하고, 각 지점마다 태양까지의 광학 두께를 구한다.
+// 파장이 짧을수록 강하게 산란되므로(1/λ^4) 한낮의 하늘은 파랗고, 빛이 대기를 비스듬히
+// 길게 지나는 새벽·노을에는 파란빛이 먼저 다 흩어져 붉은빛만 남는다. 손으로 칠하지
+// 않아도 기하가 알아서 만들어낸다.
+
+const vec3  kRayleigh     = vec3(5.8, 13.5, 33.1); // 1/λ^4 비율 (680 / 550 / 440nm)
+const float kAtmoDensity  = 1.4;                    // 전체 광학 두께(눈으로 맞춘 값)
+const float kAtmoBright   = 0.8;                    // 산란광 밝기.
+// 22.0으로 시작했다가 화면이 통째로 흰 공이 됐다. 시선이 대기를 비스듬히 길게 지나는
+// 가장자리에서는 광학 경로가 중심의 18배까지 길어져, 중심을 기준으로 맞추면 림이
+// 15를 넘겨 톤매퍼와 블룸을 동시에 포화시킨다. 림이 1.4 근처에 오도록 잡은 값이다.
+// 밀도를 대신 올리면 소광이 세져 림이 하얗게 바래므로, 파란 대기를 원하면 밝기로 잡아야 한다.
+const float kAtmoShellScale = 1.025;                 // main.cpp의 kAtmosphereShellScale과 일치
+
+// 광선-구 교차. x = 가까운 t, y = 먼 t. 만나지 않으면 x > y가 되어 판별에 쓸 수 있다.
+vec2 raySphere(vec3 ro, vec3 rd, vec3 c, float r) {
+    vec3 oc = ro - c;
+    float b = dot(oc, rd);
+    float h = b * b - (dot(oc, oc) - r * r);
+    if (h < 0.0) return vec2(1.0, -1.0);
+    h = sqrt(h);
+    return vec2(-b - h, -b + h);
+}
+
+vec3 AtmosphereScattering(vec3 ro, vec3 rd, vec3 center, float planetR, float atmoR) {
+    vec2 atmo = raySphere(ro, rd, center, atmoR);
+    if (atmo.x > atmo.y) return vec3(0.0);
+
+    float tStart = max(atmo.x, 0.0);
+    float tEnd   = atmo.y;
+
+    // 지면에 먼저 닿으면 거기서 끊는다. 땅에 가려진 대기는 보이지 않는다.
+    vec2 ground = raySphere(ro, rd, center, planetR);
+    if (ground.x <= ground.y && ground.x > 0.0) tEnd = min(tEnd, ground.x);
+    if (tEnd <= tStart) return vec3(0.0);
+
+    // 밀도가 e배 줄어드는 높이. 껍질 두께에 비례시켜 두면 리얼 스케일로 넘어가도
+    // 모양이 유지된다. 길이를 전부 행성 반지름으로 나눠 쓰는 것도 같은 이유다.
+    //
+    // 0.25로 시작했다가 대기가 반지름의 0.63%까지 부풀었다(실제 지구는 0.13%).
+    // 그러면 밝은 부분이 가장자리에 몰리지 않고 원반 전체에 퍼져 지표면을 뿌옇게 덮는다.
+    // 0.12면 밝은 띠가 표면 바로 위에 붙어, 우주에서 보는 그 얇고 푸른 지평선이 된다.
+    float thickness   = atmoR - planetR;
+    float scaleHeight = thickness * 0.12;
+
+    // 밀도가 표면 근처에 몰려 있어, 성기게 잡으면 그 층을 건너뛰어 얼룩이 생긴다.
+    const int VIEW_STEPS  = 16;
+    const int LIGHT_STEPS = 6;
+
+    float ds = (tEnd - tStart) / float(VIEW_STEPS);
+    vec3  accum = vec3(0.0);
+    float viewOptical = 0.0;
+
+    // 일식으로 태양이 가려지면 산란시킬 빛도 줄어든다. 시선 전체에 한 번만 적용해도
+    // 충분하다 — 대기 두께에 걸쳐 가림 정도가 눈에 띄게 달라지지는 않는다.
+    float sunVis = SunVisibility(ro + rd * ((tStart + tEnd) * 0.5));
+
+    for (int i = 0; i < VIEW_STEPS; ++i) {
+        vec3  P = ro + rd * (tStart + (float(i) + 0.5) * ds);
+        float h = length(P - center) - planetR;
+        float density = exp(-h / scaleHeight) * (ds / planetR);
+        viewOptical += density;
+
+        vec3 L = normalize(ubo.sunPos - P);
+
+        // 태양에서 이 지점까지 빛이 지나온 대기의 양.
+        //
+        // 예전에는 광선이 행성에 닿으면 샘플을 통째로 버렸다. 그러면 명암 경계가 칼로 자른
+        // 듯 끊겨 노을이 한 점에서만 나타난다. 대신 경로를 그대로 적분한다 — 지면 아래로
+        // 파고든 구간은 고도가 음수라 밀도가 폭발적으로 커지고, 소광이 저절로 무한대에
+        // 가까워진다. 밤면은 여전히 어둡지만 그 경계가 부드럽게 이어진다.
+        vec2  lightExit = raySphere(P, L, center, atmoR);
+        float lds = max(lightExit.y, 0.0) / float(LIGHT_STEPS);
+        float lightOptical = 0.0;
+        for (int j = 0; j < LIGHT_STEPS; ++j) {
+            vec3 Q = P + L * ((float(j) + 0.5) * lds);
+            float hq = (length(Q - center) - planetR) / scaleHeight;
+            // 지면 아래에서 지수가 폭주해 inf/NaN이 되지 않도록 상한을 둔다.
+            lightOptical += exp(-clamp(hq, -12.0, 60.0)) * (lds / planetR);
+        }
+
+        // 태양 -> 이 지점 -> 눈까지 오는 동안 흩어져 사라진 만큼을 감쇠시킨다.
+        // 파란빛이 먼저 사라지므로, 빛이 대기를 길게 지나온 명암 경계에서는 붉은빛만 남는다.
+        vec3 tau = min(kRayleigh * kAtmoDensity * (viewOptical + lightOptical), vec3(80.0));
+        accum += density * exp(-tau);
+    }
+
+    // 레일리 위상함수. 전방/후방 산란이 측방보다 강해서 역광일 때 대기가 링처럼 빛난다.
+    float mu = dot(rd, normalize(ubo.sunPos - ro));
+    float phase = 0.75 * (1.0 + mu * mu);
+
+    return accum * kRayleigh * kAtmoDensity * phase * kAtmoBright * sunVis;
+}
+
 void main() {
     gl_FragDepth = gl_FragCoord.z;
 
@@ -147,7 +245,27 @@ void main() {
     vec3 lightDir = normalize(ubo.sunPos - fragPos); 
     vec3 viewDir = normalize(ubo.cameraPos - fragPos);
 
-    if (fragObjectType == 3) { 
+    if (fragObjectType == 11) {
+        // 대기 껍질. 이 조각은 시선이 대기로 '들어가는 지점'일 뿐이고,
+        // 실제 색은 거기서부터 지면(또는 반대편 껍질)까지 적분해서 만든다.
+        // 껍질이 행성보다 크므로 실루엣 바깥으로 삐져나온 부분이 대기 링이 된다.
+        vec3 center  = vec3(push.model[3]);
+        float atmoR  = length(vec3(push.model[0]));
+        float planetR = atmoR / kAtmoShellScale;
+
+        // 껍질은 컬링이 꺼져 있어 앞면과 뒷면이 모두 래스터라이즈된다. 가산 블렌딩이라
+        // 행성 실루엣 바깥에서는(뒷면이 깊이 테스트를 통과하는 유일한 구간) 같은 광선이
+        // 두 번 더해져 테두리만 두 배로 밝아진다. 바깥 법선과 시선 방향이 같으면 뒷면이다.
+        if (dot(fragPos - ubo.cameraPos, fragPos - center) > 0.0) discard;
+
+        vec3 rd = normalize(fragPos - ubo.cameraPos);
+        vec3 scattered = AtmosphereScattering(ubo.cameraPos, rd, center, planetR, atmoR);
+
+        if (dot(scattered, vec3(1.0)) < 0.0005) discard;
+        writeOut(vec4(scattered, 1.0));
+        return;
+    }
+    else if (fragObjectType == 3) { 
         vec3 rawSky = texture(skyboxTex, fragTexCube).rgb;
         
         // 🚀 [진짜 해결책] 감마 보정(Gamma Correction) 강제 적용
@@ -341,22 +459,9 @@ void main() {
         vec3 finalColor = baseTexColor * diff * sunlightColor + specular;
         vec3 nightLights = pow(texture(texNight, uv).rgb, vec3(3.0)) * (1.0 - finalDayMix);
 
-        // =========================================================
-        // 🚀 2. 대기 산란 헤일로 (Atmospheric Halo)
-        // 발광하는 띠는 온전히 가장자리(fresnel)에서만 맺히게 돌려놓습니다.
-        // =========================================================
-        float fresnel = pow(1.0 - NdotV, 8.0); 
-
-        float dayMask = smoothstep(-0.1, 0.4, sphereNdotL); 
-        float sunsetMask = smoothstep(-0.2, 0.1, sphereNdotL) * smoothstep(0.2, -0.05, sphereNdotL);
-
-        vec3 dayAtmosphere = vec3(0.1, 0.4, 1.0) * dayMask;
-        vec3 sunsetAtmosphere = vec3(1.0, 0.3, 0.05) * sunsetMask * 1.5;
-
-        // 대기 발광은 가장자리(fresnel)에만 곱해지므로, 흉한 페인트 띠가 사라집니다.
-        vec3 atmosphericGlow = (dayAtmosphere + sunsetAtmosphere) * fresnel * shadow;
-
-        writeOut(vec4(finalColor + nightLights + atmosphericGlow, 1.0));
+        // 예전에는 여기서 프레넬로 파란 띠를 칠해 대기를 흉내 냈다. 이제는 타입 11의
+        // 대기 껍질이 실제 산란을 적분해 그리므로, 표면은 표면만 담당한다.
+        writeOut(vec4(finalColor + nightLights, 1.0));
         return;
     }
     else if (fragObjectType == 1) { // 달 · 위성 · 왜소행성

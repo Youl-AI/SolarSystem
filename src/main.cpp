@@ -55,6 +55,9 @@ struct AsteroidCullPush {
 // 가장 많은 목성계도 본체 + 갈릴레이 위성 4개라 여유가 크다.
 static constexpr int MAX_OCCLUDERS = 16;
 
+// 대기 껍질의 반지름 배율. shader.frag의 kAtmoShellScale과 반드시 같아야 한다.
+static constexpr float kAtmosphereShellScale = 1.025f;
+
 // 그림자 계산에 쓰는 태양은 화면에 그려지는 태양보다 작다. 둘이 같아야 할 이유가 없고,
 // 같게 두면 그림자가 망가진다. 이 시뮬레이션의 태양은 각크기가 실제의 수십 배라
 // (목성에서 봤을 때 실제 0.051도 vs 압축 스케일 4.7도) 반그림자가 과도하게 넓어지고
@@ -131,6 +134,10 @@ struct Planet {
     // 시뮬레이션이 궤도를 균일하게 압축하지 않아 천체마다 필요한 값이 다르다.
     // 기본값은 그림자를 드리울 일이 없는 천체용이라 아무 값이나 무방하다.
     float shadowSunShrink = SHADOW_SUN_SHRINK;
+
+    // 0보다 크면 이 천체는 대기 껍질을 그린다(지금은 지구만).
+    bool hasAtmosphere = false;
+    glm::mat4 atmosphereModelMat = glm::mat4(1.0f);
     
     // 🚀 [NEW] 위성 시스템을 위한 부모 행성 인덱스 (-1이면 태양을 공전)
     int parentIndex = -1; 
@@ -169,6 +176,8 @@ private:
     VkPipelineLayout pipelineLayout;
     VkPipeline graphicsPipeline;
     VkPipeline linePipeline;
+    // 대기 껍질 전용. 깊이를 쓰지 않고 가산 블렌딩을 쓴다는 점만 다르다.
+    VkPipeline atmospherePipeline;
     VkDescriptorPool descriptorPool;
     VkDescriptorPool imguiPool;
 
@@ -589,6 +598,7 @@ protected:
         // resolve 대상 뷰만 새로 바인딩한다.
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipeline(device, linePipeline, nullptr);
+        vkDestroyPipeline(device, atmospherePipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 
         vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr);
@@ -894,7 +904,7 @@ protected:
         for (auto& p : planets) {
             if (p.name == "Mercury") { p.realRadius = 0.19f; p.realOrbit = 195.0f; }
             else if (p.name == "Venus") { p.realRadius = 0.47f; p.realOrbit = 360.0f; }
-            else if (p.name == "Earth") { p.realRadius = 0.50f; p.realOrbit = 500.0f; }
+            else if (p.name == "Earth") { p.realRadius = 0.50f; p.realOrbit = 500.0f; p.hasAtmosphere = true; }
             else if (p.name == "Mars") { p.realRadius = 0.26f; p.realOrbit = 760.0f; }
             else if (p.name == "Ceres") { p.realRadius = 0.03f; p.realOrbit = 1385.0f; }
             else if (p.name == "Jupiter") { p.realRadius = 5.60f; p.realOrbit = 2600.0f; }
@@ -1516,6 +1526,10 @@ protected:
                                        * glm::rotate(glm::mat4(1.0f), glm::radians(planet.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
                                        * glm::rotate(glm::mat4(1.0f), slowTime * glm::radians(planet.rotationSpeed + 4.0f), glm::vec3(0.0f, 1.0f, 0.0f));
                 planet.cloudModelMat = trajectory * cloudSelfRot * glm::scale(glm::mat4(1.0f), glm::vec3(curRadius * 1.005f));
+            }
+            if (planet.hasAtmosphere) {
+                // 완전한 구라 자전이 보이지 않는다. 위치와 크기만 있으면 충분하다.
+                planet.atmosphereModelMat = trajectory * glm::scale(glm::mat4(1.0f), glm::vec3(curRadius * kAtmosphereShellScale));
             }
         }
 
@@ -2175,6 +2189,11 @@ protected:
             if (distToPlanet > (planet.radius * 1.2f)) {
                 drawObject(planet, planet.currentModelMat, planet.typeId);
                 if (planet.hasClouds) drawObject(planet, planet.cloudModelMat, 2);
+                if (planet.hasAtmosphere) {
+                    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, atmospherePipeline);
+                    drawObject(planet, planet.atmosphereModelMat, 11);
+                    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+                }
                 if (planet.name == "Saturn") {
                     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &saturnRing.descriptorSet, 0, nullptr);
                     PushConstants ringPush{planet.currentModelMat, 5}; 
@@ -2385,7 +2404,7 @@ protected:
         vkDestroyBuffer(device, uniformBuffer, nullptr); vkFreeMemory(device, uniformBufferMemory, nullptr);
         vkDestroyBuffer(device, lockedOrbitBuffer, nullptr); vkFreeMemory(device, lockedOrbitMemory, nullptr);
         vkDestroyDescriptorPool(device, descriptorPool, nullptr); vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-        vkDestroyPipeline(device, graphicsPipeline, nullptr); vkDestroyPipeline(device, linePipeline, nullptr); vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        vkDestroyPipeline(device, graphicsPipeline, nullptr); vkDestroyPipeline(device, linePipeline, nullptr); vkDestroyPipeline(device, atmospherePipeline, nullptr); vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     }
 
 private:
@@ -2700,6 +2719,18 @@ private:
 
         inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
         vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &linePipeline);
+
+        // 대기 껍질용. 두 가지만 다르다.
+        // - 깊이를 쓰지 않는다: 껍질은 행성보다 커서, 깊이를 남기면 나중에 그리는 위성이나
+        //   궤도선이 그 뒤로 사라져 버린다. 읽기는 그대로 해야 앞의 물체에 가려진다.
+        // - 가산 블렌딩: 산란광은 뒤를 가리는 게 아니라 빛을 더하는 것이다.
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        depthStencil.depthWriteEnable = VK_FALSE;
+        colorBlendAttachment[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment[1].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &atmospherePipeline);
 
         vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr);
     }
