@@ -137,6 +137,31 @@ float SunDiscOcclusion(vec3 P) {
     return covered;
 }
 
+// ── 고배율 디테일 ──────────────────────────────────────────────────────────
+// 8K 텍스처라도 표면에 바짝 붙으면 텍셀 하나가 여러 픽셀로 늘어나 죽처럼 뭉개진다.
+// 늘어난 정도를 화면 미분(fwidth)으로 직접 재서, 텍셀보다 픽셀이 촘촘해지는 구간에서만
+// 절차적 노이즈를 섞는다. 멀리서는 계수가 0이라 원본 텍스처가 한 톨도 바뀌지 않는다.
+//
+// 노이즈 텍스처를 따로 두지 않고 태양 표면에 쓰던 fbm을 그대로 재활용하므로 VRAM은 0이다.
+// SpaceEngine이 실측 베이스맵 아래를 절차적으로 채우는 것과 같은 발상이고, 다만 여기서는
+// 지형을 지어내지 않고 이미 있는 색을 잘게 흔들어 뭉갬만 가린다.
+float DetailFactor(vec2 uv, sampler2D tex) {
+    // fwidth는 화면상 이웃 픽셀과의 차이다. 텍스처 크기를 곱하면 '픽셀당 텍셀 수'가 된다.
+    // 1보다 작다는 건 텍셀 하나가 여러 픽셀에 걸쳐 늘어났다는 뜻이다.
+    vec2 texelsPerPixel = fwidth(uv) * vec2(textureSize(tex, 0));
+    return 1.0 - smoothstep(0.15, 1.0, max(texelsPerPixel.x, texelsPerPixel.y));
+}
+
+// UV가 아니라 구면 법선으로 노이즈를 만든다. UV를 쓰면 극지방에서 경선이 모이며
+// 무늬가 함께 뭉쳐 눈에 띄는 특이점이 생긴다.
+vec3 ApplyDetail(vec3 albedo, vec3 sphereNormal, float amount) {
+    if (amount <= 0.0) return albedo;
+    // 주파수는 텍스처 텍셀보다 잘아야 의미가 있다. 8K 지구는 텍셀 하나가 약 4.9km인데,
+    // 4000이면 첫 옥타브가 약 1.6km, 마지막 옥타브가 약 200m라 그 아래를 메운다.
+    float n = fbm(sphereNormal * 4000.0);
+    return albedo * mix(1.0, 0.78 + 0.44 * n, amount);
+}
+
 // 조명에 곱할 밝기 계수(1 = 그늘 없음, 0 = 완전한 그늘).
 float SunVisibility(vec3 P) { return 1.0 - SunDiscOcclusion(P); }
 
@@ -453,7 +478,8 @@ void main() {
         float eclipseMix = smoothstep(0.0, 1.0, shadow); 
         float finalDayMix = dayMix * eclipseMix;
         
-        vec3 baseTexColor = texture(texDiffuse, uv).rgb;
+        vec3 baseTexColor = ApplyDetail(texture(texDiffuse, uv).rgb, baseNormal,
+                                       DetailFactor(uv, texDiffuse));
         
         // 지면에 닿는 조명(diff)에 방금 만든 노을빛(sunlightColor)을 곱해줍니다!
         vec3 finalColor = baseTexColor * diff * sunlightColor + specular;
@@ -471,7 +497,9 @@ void main() {
         // 모행성이나 다른 위성에 가려지는 경우(예: 목성 그림자로 들어가는 이오)를 함께 처리한다.
         float shadow = SunVisibility(fragPos);
         float diff = max(dot(preciseNormal, lightDir), 0.0) * shadow;
-        writeOut(vec4(texture(texDiffuse, fragTexCoord).rgb * diff, 1.0));
+        vec3 moonAlbedo = ApplyDetail(texture(texDiffuse, fragTexCoord).rgb, baseNormal,
+                                     DetailFactor(fragTexCoord, texDiffuse));
+        writeOut(vec4(moonAlbedo * diff, 1.0));
         return;
     }
     else if (fragObjectType == 2) { // 구름
