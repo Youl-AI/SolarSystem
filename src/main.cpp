@@ -139,7 +139,15 @@ struct Planet {
     // 0보다 크면 이 천체는 대기 껍질을 그린다(지금은 지구만).
     bool hasAtmosphere = false;
     glm::mat4 atmosphereModelMat = glm::mat4(1.0f);
-    
+
+    // normal 맵의 접선 성분을 셰이더에서 몇 배로 증폭할지.
+    //
+    // 8비트 normal 맵은 x·y가 128 근처에 몰려 있어서(실측 DEM은 범위의 20%밖에 안 쓴다)
+    // 셰이더에서 5배로 키우면 양자화 계단도 같이 5배가 되어 명암 경계에 띠가 생긴다.
+    // 그래서 실측 DEM 맵은 구울 때 미리 S배 증폭해 8비트 범위를 채우고, 여기서 5/S를 넘긴다.
+    // 중간 정규화가 세 성분을 같은 값으로 나누므로 결과 법선은 5배 증폭과 정확히 동일하다.
+    float normalAmp = 5.0f;
+
     // 🚀 [NEW] 위성 시스템을 위한 부모 행성 인덱스 (-1이면 태양을 공전)
     int parentIndex = -1; 
 
@@ -840,10 +848,10 @@ protected:
         sun = createPlanet("Sun", 4, 1.80f, 0.0f, 0.0f, 0.0f, 0.9f, 7.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/sun.jpg", "", "", "", "");
         
         // 1. 내행성 (수~화)
-        planets.push_back(createPlanet("Mercury", 0, 0.11f, 3.50f, 15.00f, 0.205f, 0.43f, 0.03f, 7.0f, 77.0f, 48.0f, 120.0f, 45.0f, false, "textures/planets/8k_mercury.jpg", "", "", "", ""));  // index 0
-        planets.push_back(createPlanet("Venus", 0, 0.19f, 4.80f, 11.00f, 0.006f, 0.1f, 177.36f, 3.4f, 131.0f, 76.0f, 30.0f, 100.0f, true, "textures/planets/8k_venus_surface.jpg", "", "", "", "textures/planets/venus_atmosphere.jpg"));  // index 1
+        planets.push_back(createPlanet("Mercury", 0, 0.11f, 3.50f, 15.00f, 0.205f, 0.43f, 0.03f, 7.0f, 77.0f, 48.0f, 120.0f, 45.0f, false, "textures/planets/8k_mercury.jpg", "", "", "textures/planets/mercury_normal.png", ""));  // index 0
+        planets.push_back(createPlanet("Venus", 0, 0.19f, 4.80f, 11.00f, 0.006f, 0.1f, 177.36f, 3.4f, 131.0f, 76.0f, 30.0f, 100.0f, true, "textures/planets/8k_venus_surface.jpg", "", "", "textures/planets/venus_normal.png", "textures/planets/venus_atmosphere.jpg"));  // index 1
         planets.push_back(createPlanet("Earth", 0, 0.20f, 6.00f, 10.00f, 0.016f, 25.0f, 23.44f, 0.0f, 102.0f, 0.0f, 200.0f, 0.0f, true, "textures/planets/8k_earth.jpg", "textures/planets/8k_earth_nightmap.jpg", "textures/planets/8k_earth_specular.png", "textures/planets/8k_earth_normal.png", "textures/planets/8k_earth_clouds.jpg"));  // index 2
-        planets.push_back(createPlanet("Mars", 0, 0.14f, 7.50f, 8.50f, 0.093f, 24.3f, 25.19f, 1.85f, 336.0f, 49.0f, 310.0f, 210.0f, false, "textures/planets/8k_mars.jpg", "", "", "", ""));  // index 3
+        planets.push_back(createPlanet("Mars", 0, 0.14f, 7.50f, 8.50f, 0.093f, 24.3f, 25.19f, 1.85f, 336.0f, 49.0f, 310.0f, 210.0f, false, "textures/planets/8k_mars.jpg", "", "", "textures/planets/mars_normal.png", ""));  // index 3
         
         // 2. 소행성대 (세레스가 11.0에서 기준선 역할을 합니다)
         planets.push_back(createPlanet("Ceres", 1, 0.04f, 11.00f, 6.50f, 0.076f, 66.6f, 4.0f, 10.6f, 73.0f, 80.0f, 0.0f, 0.0f, false, "textures/asteroids/ceres.jpg", "", "", "", ""));  // index 4
@@ -903,10 +911,11 @@ protected:
         moon.realRadius = 0.13f; moon.realOrbit = 1.5f;
         moon.shadowSunShrink = SHADOW_SUN_SHRINK_MOON;
         for (auto& p : planets) {
-            if (p.name == "Mercury") { p.realRadius = 0.19f; p.realOrbit = 195.0f; }
-            else if (p.name == "Venus") { p.realRadius = 0.47f; p.realOrbit = 360.0f; }
+            // 실측 DEM에서 구운 normal 맵은 4배(금성은 7배) 미리 증폭해 두었으므로 5/S를 넘긴다.
+            if (p.name == "Mercury") { p.realRadius = 0.19f; p.realOrbit = 195.0f; p.normalAmp = 5.0f / 4.0f; }
+            else if (p.name == "Venus") { p.realRadius = 0.47f; p.realOrbit = 360.0f; p.normalAmp = 5.0f / 7.0f; }
             else if (p.name == "Earth") { p.realRadius = 0.50f; p.realOrbit = 500.0f; p.hasAtmosphere = true; }
-            else if (p.name == "Mars") { p.realRadius = 0.26f; p.realOrbit = 760.0f; }
+            else if (p.name == "Mars") { p.realRadius = 0.26f; p.realOrbit = 760.0f; p.normalAmp = 5.0f / 4.0f; }
             else if (p.name == "Ceres") { p.realRadius = 0.03f; p.realOrbit = 1385.0f; }
             else if (p.name == "Jupiter") { p.realRadius = 5.60f; p.realOrbit = 2600.0f; }
             else if (p.name == "Saturn") { p.realRadius = 4.72f; p.realOrbit = 4790.0f; }
@@ -2176,7 +2185,7 @@ protected:
         tsMark(cb, 2); // 소행성 그리기 끝
         auto drawObject = [&](const Planet &p, glm::mat4 mat, int type) {
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &p.descriptorSet, 0, nullptr);
-            PushConstants pc{mat, type}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+            PushConstants pc{mat, type, p.normalAmp}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0); 
         };
 

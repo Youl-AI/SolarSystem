@@ -32,7 +32,11 @@ float fbm(vec3 x) { float v = 0.0; float a = 0.5; vec3 shift = vec3(100.0); for(
 
 vec3 calculateNormal(vec2 uv, vec3 baseNormal) {
     vec3 tangentNormal = texture(texNormalDisp, uv).xyz * 2.0 - 1.0;
-    tangentNormal.xy *= 5.0; tangentNormal = normalize(tangentNormal);
+    // 증폭 배수는 천체마다 다르다(Planet::normalAmp 참조). 실측 DEM 맵은 8비트 정밀도를
+    // 살리려고 구울 때 미리 증폭해 두었으므로 여기서는 그만큼 덜 키운다.
+    // customData를 안 넘기는 경로가 생기면 0이 들어와 요철이 사라지므로 예전 값으로 되돌린다.
+    float amp = push.customData > 0.0 ? push.customData : 5.0;
+    tangentNormal.xy *= amp; tangentNormal = normalize(tangentNormal);
     vec3 N = normalize(baseNormal); vec3 up = normalize(vec3(0.0, 1.0, 0.001));
     vec3 T = normalize(cross(up, N)); vec3 B = cross(N, T);
     return normalize(mat3(T, B, N) * tangentNormal);
