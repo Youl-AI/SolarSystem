@@ -10,6 +10,9 @@ layout(location = 6) in vec4 fragPosLightSpace;
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view; mat4 proj; vec3 cameraPos; float time;
     vec3 sunPos; float sunRadius; vec3 earthPos; float earthRadius; vec3 moonPos; float moonRadius;
+    vec4 occluders[16];       // xyz = 중심(카메라 상대), w = 반지름. MAX_OCCLUDERS와 반드시 일치.
+    vec4 occluderParams[16];  // x = 이 천체의 그림자에 쓸 태양 반지름(렌더되는 크기와 다르다)
+    int occluderCount;
     mat4 lightSpaceMatrix;
 } ubo;
 
@@ -109,14 +112,65 @@ float RingShadow(vec3 pixelPos, vec3 sunPos, mat4 model, float ringInner, float 
     return 1.0 - density * 0.45;                     // 고리는 반투명이라 절반 이하만 가린다
 }
 
-float ProjectShadow(vec3 pixelPos, vec3 sunPos, vec3 occluderPos, float occluderRadius) {
-    vec3 lightBeamDir = normalize(occluderPos - sunPos);
-    vec3 pixelFromOccluder = pixelPos - occluderPos;
-    float distanceBehind = dot(pixelFromOccluder, lightBeamDir);
-    if (distanceBehind < 0.0) return 1.0; 
-    float distanceFromCenter = length(pixelFromOccluder - lightBeamDir * distanceBehind);
-    return smoothstep(occluderRadius * 0.8, occluderRadius, distanceFromCenter);
+// 반지름 R인 원반이 반지름 r인 원반에 중심 간격 d만큼 떨어져 겹칠 때, R이 가려지는 면적 비율.
+// 두 원의 렌즈꼴 교차 면적 공식이라 근사가 아니라 정확한 값이다.
+float DiscOverlapFraction(float R, float r, float d) {
+    if (d >= R + r) return 0.0;              // 안 겹침
+    if (d <= r - R) return 1.0;              // 개기: 가리는 쪽이 태양을 통째로 덮는다
+    if (d <= R - r) return (r * r) / (R * R); // 금환: 가리는 쪽이 태양 안에 쏙 들어간다
+
+    float d2 = d * d, R2 = R * R, r2 = r * r;
+    float a1 = acos(clamp((d2 + R2 - r2) / (2.0 * d * R), -1.0, 1.0));
+    float a2 = acos(clamp((d2 + r2 - R2) / (2.0 * d * r), -1.0, 1.0));
+    float tri = 0.5 * sqrt(max(0.0, (-d + r + R) * (d + r - R) * (d - r + R) * (d + r + R)));
+    return clamp((R2 * a1 + r2 * a2 - tri) / (3.14159265 * R2), 0.0, 1.0);
 }
+
+// 이 지점에서 봤을 때 태양 원반이 가려진 비율(0 = 완전히 밝음, 1 = 개기).
+//
+// 셰도우 맵을 대체한다. 천체가 전부 구라서 광선-구 교차로 정확히 풀리고,
+// 텍셀이라는 개념이 없으므로 아무리 확대해도 그림자 경계에 계단이 생기지 않는다.
+// 태양을 점이 아니라 원반으로 두기 때문에 본영과 반영이 공짜로, 물리적으로 맞게 나온다.
+float SunDiscOcclusion(vec3 P) {
+    vec3 toSun = ubo.sunPos - P;
+    float dSun = length(toSun);
+    if (dSun < 1e-6) return 0.0;
+    vec3 sunDir = toSun / dSun;
+
+    float covered = 0.0;
+    for (int i = 0; i < ubo.occluderCount; ++i) {
+        vec3 C = ubo.occluders[i].xyz;
+        float r = ubo.occluders[i].w;
+
+        // 태양의 각반지름은 천체마다 다르다. 화면에 그려지는 태양은 연출상 크게 두되,
+        // 그림자 기하는 실제 비율을 쓰려고 천체별로 축소된 반지름을 넘겨받는다.
+        // (자세한 이유는 main.cpp의 SHADOW_SUN_SHRINK 주석 참고)
+        float aSun = asin(clamp(ubo.occluderParams[i].x / dSun, 0.0, 1.0));
+        if (aSun <= 0.0) continue;
+
+        vec3 toOcc = C - P;
+        float dOcc = length(toOcc);
+
+        // 자기 자신은 건너뛴다. 표면 위의 점은 자기 중심에서 정확히 반지름만큼 떨어져 있다.
+        // 자기 그림자(밤면)는 어차피 NdotL이 처리하므로 여기서 볼 필요가 없다.
+        if (dOcc <= r * 1.001) continue;
+        if (dOcc >= dSun) continue;                    // 태양보다 멀면 가릴 수 없다
+
+        float cosSep = dot(sunDir, toOcc / dOcc);
+        if (cosSep <= 0.0) continue;                   // 태양 반대편에 있다
+
+        float aOcc = asin(clamp(r / dOcc, 0.0, 1.0));  // 가리는 천체의 각반지름
+        float sep = acos(clamp(cosSep, -1.0, 1.0));    // 태양 중심과의 각거리
+
+        // 합이 아니라 최댓값. 두 위성이 겹쳐 보일 때 1을 넘겨버리는 걸 막고,
+        // 실제로도 거의 항상 하나가 지배적이다.
+        covered = max(covered, DiscOverlapFraction(aSun, aOcc, sep));
+    }
+    return covered;
+}
+
+// 조명에 곱할 밝기 계수(1 = 그늘 없음, 0 = 완전한 그늘).
+float SunVisibility(vec3 P) { return 1.0 - SunDiscOcclusion(P); }
 
 void main() {
     gl_FragDepth = gl_FragCoord.z;
@@ -288,7 +342,7 @@ void main() {
         float sphereNdotL = dot(baseNormal, lightDir); 
         float NdotV = max(dot(baseNormal, viewDir), 0.001);
 
-        float shadow = ProjectShadow(fragPos, ubo.sunPos, ubo.moonPos, ubo.moonRadius);
+        float shadow = SunVisibility(fragPos);
 
         // 가스 행성은 고리 그림자를 함께 받는다(고리 반지름은 generateRing(1.2, 2.2)와 일치).
         // 토성 외에는 texClouds가 알파 0 더미라 자동으로 1.0이 반환된다.
@@ -296,9 +350,7 @@ void main() {
             shadow *= RingShadow(fragPos, ubo.sunPos, push.model, 1.2, 2.2);
         }
 
-        // 위성이 본체에 드리우는 그림자(예: 목성 위의 이오 그림자). 해석적 ProjectShadow는
-        // 지구의 달 하나만 다루므로, 나머지는 셰도우 맵이 담당한다.
-        shadow *= 1.0 - ShadowMapOcclusion(fragPosLightSpace, preciseNormal, lightDir) * 0.9;
+        // 위성이 본체에 드리우는 그림자(예: 목성 위의 이오)는 SunVisibility가 계 전체를 한 번에 처리한다.
         
         // =========================================================
         // 🚀 1. 지표면 노을 틴팅 (Terrain Sunset Tint)
@@ -343,15 +395,14 @@ void main() {
         // normal 맵을 반영해 크레이터 요철이 명암 경계에서 드러나게 한다.
         // normal 맵이 없는 천체는 더미 평면 법선(0,0,1)이 바인딩되어 있어 기존 외형이 그대로 유지된다.
         vec3 preciseNormal = calculateNormal(fragTexCoord, baseNormal);
-        float shadow = ProjectShadow(fragPos, ubo.sunPos, ubo.earthPos, ubo.earthRadius);
-        // 모행성이나 다른 위성에 가려지는 경우(예: 목성 그림자로 들어가는 이오)를 셰도우 맵이 잡는다.
-        shadow *= 1.0 - ShadowMapOcclusion(fragPosLightSpace, preciseNormal, lightDir) * 0.9;
+        // 모행성이나 다른 위성에 가려지는 경우(예: 목성 그림자로 들어가는 이오)를 함께 처리한다.
+        float shadow = SunVisibility(fragPos);
         float diff = max(dot(preciseNormal, lightDir), 0.0) * shadow;
         writeOut(vec4(texture(texDiffuse, fragTexCoord).rgb * diff, 1.0));
         return;
     }
     else if (fragObjectType == 2) { // 구름
-        float shadow = ProjectShadow(fragPos, ubo.sunPos, ubo.moonPos, ubo.moonRadius);
+        float shadow = SunVisibility(fragPos);
         float diff = max(dot(baseNormal, lightDir), 0.0) * shadow;
         writeOut(vec4(texture(texClouds, fragTexCoord).rgb * diff, texture(texClouds, fragTexCoord).r));
         return;
@@ -415,9 +466,9 @@ void main() {
         vec3 lightDir = normalize(ubo.sunPos - fragPos);
         float diff = max(dot(sharpNormal, lightDir), 0.05); 
         
-        // 예전에는 여기서 z까지 0.5*z+0.5로 옮겨 깊이를 과대평가하는 바람에 소행성이
-        // 사실상 상시 그늘(밝기 20%)로 그려지고 있었다. 공용 함수가 Vulkan 규약대로 처리한다.
-        float shadow = ShadowMapOcclusion(fragPosLightSpace, sharpNormal, lightDir);
+        // 소행성은 구가 아니라 '가리는 쪽'은 될 수 없지만, '가려지는 쪽'은 될 수 있다.
+        // (소행성끼리 드리우는 그림자는 화면에서 사실상 보이지 않아 잃는 게 없다)
+        float shadow = SunDiscOcclusion(fragPos);
 
         vec3 finalColor = albedo * diff * (1.0 - shadow * 0.8);
         finalColor = pow(finalColor, vec3(0.85)); 

@@ -51,6 +51,29 @@ struct AsteroidCullPush {
     uint32_t asteroidCount;
 };
 
+// 한 행성계 안에서 서로 그림자를 주고받는 천체 수의 상한.
+// 가장 많은 목성계도 본체 + 갈릴레이 위성 4개라 여유가 크다.
+static constexpr int MAX_OCCLUDERS = 16;
+
+// 그림자 계산에 쓰는 태양은 화면에 그려지는 태양보다 작다. 둘이 같아야 할 이유가 없고,
+// 같게 두면 그림자가 망가진다. 이 시뮬레이션의 태양은 각크기가 실제의 수십 배라
+// (목성에서 봤을 때 실제 0.051도 vs 압축 스케일 4.7도) 반그림자가 과도하게 넓어지고
+// 본영 원뿔이 짧아져, 멀리 있는 위성은 본영이 모행성에 닿지도 못한다.
+// 실제로는 칼리스토도 목성에 또렷한 그림자를 드리우는데 그게 사라져 있었다.
+//
+// 태양 반지름을 5로 나누면 갈릴레이 위성 넷의 각반지름 비가 실제값에 들어맞는다
+// (칼리스토 0.29 -> 1.45, 실제 1.49). 그림자의 크기는 그대로고 경계만 제대로 조여진다.
+static constexpr float SHADOW_SUN_SHRINK = 5.0f;
+
+// 달만 예외. 시뮬레이션이 궤도를 균일하게 압축하지 않아 하나의 계수로는 모든 쌍이 안 맞는다.
+// 위 5.0을 그대로 쓰면 달의 비가 2.43이 되어 늘 깊은 개기가 되고 금환일식이 사라진다.
+// 2.0이면 0.97로, 달이 태양을 '간신히' 덮는 실제 지구의 값과 같아진다.
+// 개기와 금환이 둘 다 일어나는 건 이 비가 1 근처인 지구뿐이라, 이 값은 지킬 가치가 있다.
+// 2.0은 비가 0.94라 금환일식만 나오고 검은 본영이 원리상 생기지 않았다(달이 태양보다
+// 각도상 작아 정중앙에서도 테두리가 링으로 남는다). 2.2면 1.03이 되어 개기가 성립한다.
+// 실제 지구는 궤도 이심률 때문에 이 비가 0.94~1.08을 오가며 금환과 개기가 번갈아 일어난다.
+static constexpr float SHADOW_SUN_SHRINK_MOON = 2.2f;
+
 struct UniformBufferObject {
     glm::mat4 view;
     glm::mat4 proj;
@@ -62,6 +85,13 @@ struct UniformBufferObject {
     float earthRadius;
     alignas(16) glm::vec3 moonPos;
     float moonRadius;
+    // 해석적 그림자용 가림 천체 목록. xyz = 카메라 상대 중심, w = 지금 렌더되는 반지름.
+    // 셰도우 맵을 대체한다. 구가 구에 드리우는 그림자는 광선-구 교차로 정확히 풀리므로
+    // 텍셀이라는 개념이 없어 아무리 확대해도 계단이 생기지 않는다.
+    alignas(16) glm::vec4 occluders[MAX_OCCLUDERS];
+    // x = 이 천체의 그림자를 계산할 때 쓸 태양 반지름. 렌더되는 태양과 일부러 다르게 둔다.
+    alignas(16) glm::vec4 occluderParams[MAX_OCCLUDERS];
+    int occluderCount;
     alignas(16) glm::mat4 lightSpaceMatrix;
 };
 
@@ -96,6 +126,12 @@ struct Planet {
 
     float realRadius = 1.0f;
     float realOrbit = 1.0f;
+
+    // 이 천체가 그림자를 드리울 때 쓸 태양 축소 계수(자세한 이유는 SHADOW_SUN_SHRINK 주석).
+    // 값이 클수록 태양을 작게 보므로 본영이 넓어지고 반영 테두리가 얇아진다.
+    // 시뮬레이션이 궤도를 균일하게 압축하지 않아 천체마다 필요한 값이 다르다.
+    // 기본값은 그림자를 드리울 일이 없는 천체용이라 아무 값이나 무방하다.
+    float shadowSunShrink = SHADOW_SUN_SHRINK;
     
     // 🚀 [NEW] 위성 시스템을 위한 부모 행성 인덱스 (-1이면 태양을 공전)
     int parentIndex = -1; 
@@ -868,7 +904,8 @@ protected:
         // 🚀 [NEW] 리얼 스케일(Real Scale) 타겟 데이터 주입
         // =========================================================
         sun.realRadius = 54.0f; sun.realOrbit = 0.0f;
-        moon.realRadius = 0.13f; moon.realOrbit = 1.5f; 
+        moon.realRadius = 0.13f; moon.realOrbit = 1.5f;
+        moon.shadowSunShrink = SHADOW_SUN_SHRINK_MOON;
         for (auto& p : planets) {
             if (p.name == "Mercury") { p.realRadius = 0.19f; p.realOrbit = 195.0f; }
             else if (p.name == "Venus") { p.realRadius = 0.47f; p.realOrbit = 360.0f; }
@@ -883,11 +920,11 @@ protected:
             else if (p.name == "Haumea") { p.realRadius = 0.06f; p.realOrbit = 21550.0f; }
             else if (p.name == "Makemake") { p.realRadius = 0.05f; p.realOrbit = 22650.0f; }
             else if (p.name == "Eris") { p.realRadius = 0.09f; p.realOrbit = 34000.0f; }
-            else if (p.name == "Io") { p.realRadius = 0.14f; p.realOrbit = 6.2f; } 
-            else if (p.name == "Europa") { p.realRadius = 0.12f; p.realOrbit = 9.8f; }
-            else if (p.name == "Ganymede") { p.realRadius = 0.20f; p.realOrbit = 15.7f; }
-            else if (p.name == "Callisto") { p.realRadius = 0.18f; p.realOrbit = 27.6f; }
-            else if (p.name == "Titan") { p.realRadius = 0.20f; p.realOrbit = 12.2f; }
+            else if (p.name == "Io") { p.realRadius = 0.14f; p.realOrbit = 6.2f; p.shadowSunShrink = 2.1f; }  // 실제 비 5.82 
+            else if (p.name == "Europa") { p.realRadius = 0.12f; p.realOrbit = 9.8f; p.shadowSunShrink = 3.3f; }  // 실제 비 2.91
+            else if (p.name == "Ganymede") { p.realRadius = 0.20f; p.realOrbit = 15.7f; p.shadowSunShrink = 4.4f; }  // 실제 비 2.95
+            else if (p.name == "Callisto") { p.realRadius = 0.18f; p.realOrbit = 27.6f; p.shadowSunShrink = 5.1f; }  // 실제 비 1.49 - 본영이 목성에 겨우 닿는다
+            else if (p.name == "Titan") { p.realRadius = 0.20f; p.realOrbit = 12.2f; p.shadowSunShrink = 2.9f; }  // 실제 비 4.57
         }
 
         createGraphicsPipeline();
@@ -1820,7 +1857,10 @@ protected:
         ubo.proj[1][1] *= -1;
         ubo.cameraPos = relativeToCamera(camera.getEyeWorld());
         ubo.time = time;
-        ubo.sunPos = relativeToCamera(sun.currentPosition); ubo.sunRadius = sun.radius;
+        // 태양의 각반지름이 반그림자 폭을 결정하므로, 지금 실제로 렌더되는 크기를 써야 한다.
+        // (예전엔 sun.radius 고정이라 리얼 스케일에서 그림자 계산이 어긋났다)
+        ubo.sunPos = relativeToCamera(sun.currentPosition);
+        ubo.sunRadius = glm::mix(sun.radius, sun.realRadius, easeScale);
         ubo.earthPos = relativeToCamera(planets[2].currentPosition); ubo.earthRadius = planets[2].radius;
         ubo.moonPos = relativeToCamera(moon.currentPosition); ubo.moonRadius = moon.radius;
 
@@ -1847,6 +1887,25 @@ protected:
         if (shadowSystemIncludesEarthMoon)
             systemRadius = std::max(systemRadius, (float)glm::distance(moon.currentPosition, primaryPos)
                                                  + glm::mix(moon.radius, moon.realRadius, easeScale));
+
+        // ── 해석적 그림자에 넘길 가림 천체들 ─────────────────────────────────
+        // 위에서 고른 '계'를 그대로 쓴다. 행성끼리는 실제로 그림자를 드리우지 않으므로
+        // 목록에 넣지 않는다(보기 좋으라고 궤도를 압축해 둔 탓에 생기는 가짜 그림자를 막는다).
+        // 반지름은 셰도우 맵 쪽과 같은 mix를 써서 리얼 스케일 전환 중에도 어긋나지 않게 한다.
+        ubo.occluderCount = 0;
+        auto addOccluder = [&](const glm::dvec3 &pos, float r, float sunShrink) {
+            if (ubo.occluderCount >= MAX_OCCLUDERS) return;
+            ubo.occluders[ubo.occluderCount] = glm::vec4(relativeToCamera(pos), r);
+            ubo.occluderParams[ubo.occluderCount] = glm::vec4(ubo.sunRadius / sunShrink, 0.0f, 0.0f, 0.0f);
+            ubo.occluderCount++;
+        };
+        for (int i : shadowSystemIndices)
+            addOccluder(planets[i].currentPosition,
+                        glm::mix(planets[i].radius, planets[i].realRadius, easeScale),
+                        planets[i].shadowSunShrink);
+        if (shadowSystemIncludesEarthMoon)
+            addOccluder(moon.currentPosition,
+                        glm::mix(moon.radius, moon.realRadius, easeScale), moon.shadowSunShrink);
 
         glm::vec3 shadowFocusPos = relativeToCamera(primaryPos);
         glm::vec3 sunPosRel = relativeToCamera(sun.currentPosition);
