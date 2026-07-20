@@ -21,6 +21,9 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <cmath>
+#include <cfloat>
+#include <unordered_map>
 #include <fstream>
 #include <string>
 
@@ -38,8 +41,14 @@
 
 struct PushConstants {
     alignas(16) glm::mat4 model;
-    int objectType; 
+    int objectType;
     float customData;
+};
+
+// 소행성 LOD 컴퓨트용 푸시 상수. asteroid_cull.comp의 BeltPush와 레이아웃이 일치해야 한다.
+struct AsteroidCullPush {
+    alignas(16) glm::mat4 beltModel;
+    uint32_t asteroidCount;
 };
 
 struct UniformBufferObject {
@@ -148,6 +157,10 @@ private:
     VkBuffer computeInputBuffer;  VkDeviceMemory computeInputMem;  // (읽기전용) 원본 2만개
     VkBuffer computeOutputBuffer; VkDeviceMemory computeOutputMem; // (쓰기전용) 계산 완료된 행렬
     VkBuffer indirectDrawBuffer;  VkDeviceMemory indirectDrawMem;  // (명령용) GPU 스스로 내릴 명령서
+    uint32_t asteroidBucketCapacity = 0; // 12개 LOD 바구니 각각의 최대 수용량 = 전체 소행성 수
+    // 이번 프레임에 그림자를 주고받는 천체들(현재 보고 있는 행성 + 그 위성들).
+    std::vector<int> shadowSystemIndices;
+    bool shadowSystemIncludesEarthMoon = false;
     void* indirectDrawMapped = nullptr; 
 
     // 매 프레임 GPU 명령서를 초기화할 CPU 원본 템플릿
@@ -155,8 +168,12 @@ private:
     
     // (LOD 정점 기록장은 그대로 유지)
     uint32_t highLodIndexCount[4], highLodFirstIndex[4]; int32_t highLodVertexOffset[4];
-    uint32_t midLodIndexCount = 0, midLodFirstIndex = 0; int32_t midLodVertexOffset = 0;
-    uint32_t lowLodIndexCount = 0, lowLodFirstIndex = 0; int32_t lowLodVertexOffset = 0;
+    // 중간 LOD는 타입별로 원본 모델을 단순화해 만든다. 공용 구를 쓰면 조금만 멀어져도
+    // 바위가 완벽한 구로 튀어 팝핑이 눈에 띈다.
+    uint32_t midLodIndexCount[4] = {}, midLodFirstIndex[4] = {}; int32_t midLodVertexOffset[4] = {};
+    // 최하 LOD도 타입별 단순화 메시다. 구를 쓰면 화면에서 몇 픽셀만 돼도 실루엣이 매끈해져
+    // 바위 느낌이 사라진다. 아주 거칠게 줄여도 불규칙한 윤곽은 남는다.
+    uint32_t lowLodIndexCount[4] = {}, lowLodFirstIndex[4] = {}; int32_t lowLodVertexOffset[4] = {};
     Planet asteroidTypes[4];
 
     VkSampler textureSampler;
@@ -234,7 +251,10 @@ private:
     // msaaColor/msaaBright는 멀티샘플 렌더 타겟이고, 위 offscreenColor/BrightImage가 resolve 대상(계속 SAMPLED).
     // 깊이는 다운스트림에서 안 쓰므로 offscreenDepthImage 자체를 멀티샘플로 만들어 그대로 렌더 타겟으로 쓴다.
     VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT;
-    VkExtent2D renderExtent{}; // 오프스크린/블러 렌더 크기 = renderScale x swapChainExtent
+    VkExtent2D renderExtent{}; // 오프스크린 렌더 크기 = renderScale x swapChainExtent
+    // 블룸은 정의상 저주파라 절반 해상도로 흐려도 눈에 띄지 않는다. 픽셀 수가 1/4이 되어
+    // 6번의 블러 패스 비용이 크게 줄고, 포스트 합성 때 선형 보간으로 부드럽게 확대된다.
+    VkExtent2D blurExtent{};
     float appliedRenderScale = 1.0f;
     bool  pendingOffscreenRecreate = false; // 렌더스케일/MSAA 변경 시
     VkImage msaaColorImage = VK_NULL_HANDLE, msaaBrightImage = VK_NULL_HANDLE;
@@ -277,6 +297,13 @@ private:
 
 protected:
     void onFrameStart() override {
+        if (profiling) {
+            double now = glfwGetTime();
+            if (tsLastFrameStart > 0.0) tsAccumCpuFrame += (now - tsLastFrameStart) * 1000.0;
+            tsLastFrameStart = now;
+            collectProfile();
+            ++tsFrameCount;
+        }
         // VSync 변경은 present mode만 바꾸면 되므로 스왑체인 재생성으로 처리.
         if (settings.vsync != appliedVsync) {
             appliedVsync = settings.vsync;
@@ -494,6 +521,7 @@ protected:
         cleanupSwapChain();
 
         createSwapChain();
+        createRenderFinishedSemaphores(); // 이미지 수가 달라질 수 있으므로 다시 만든다
         computeRenderExtent(); // 창 크기 변경 시 오프스크린도 scale x 새-창크기로 유지
         createImageViews();
         createDepthResources();
@@ -604,8 +632,78 @@ protected:
         // orbitLines / realScale은 저장하지 않는다 — 항상 OFF로 시작하는 런타임 전용 뷰 토글.
     }
 
+    // ── 성능 계측 (진단용) ────────────────────────────────────────────────
+    // SOLAR_PROFILE=1 환경변수를 주고 실행하면 패스별 GPU 시간과 CPU 시간을 콘솔에 찍는다.
+    VkQueryPool tsPool = VK_NULL_HANDLE;
+    float tsPeriodNs = 0.0f;
+    bool profiling = false;
+    int tsFrameCount = 0;
+    double tsAccumCpuRecord = 0.0, tsAccumCpuFrame = 0.0, tsLastFrameStart = 0.0;
+    double tsAccumGpu[11] = {};
+    VkDrawIndexedIndirectCommand lastDrawCmds[12] = {}; // 직전 프레임의 LOD 바구니 스냅샷
+    static const int TS_SLOTS = 12; // 0시작 1컴퓨트 2섀도우 3소행성 4행성 5은하 6궤도선 7태양 8블러 9포스트 10끝
+
+    void initProfiling() {
+        const char* env = std::getenv("SOLAR_PROFILE");
+        profiling = (env && env[0] == '1');
+        if (!profiling) return;
+        VkPhysicalDeviceProperties props{}; vkGetPhysicalDeviceProperties(physicalDevice, &props);
+        tsPeriodNs = props.limits.timestampPeriod;
+        VkQueryPoolCreateInfo qi{}; qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = TS_SLOTS;
+        vkCreateQueryPool(device, &qi, nullptr, &tsPool);
+        std::cout << "[profile] on. timestampPeriod=" << tsPeriodNs << " ns/tick\n";
+    }
+
+    // 직전 프레임의 타임스탬프를 읽어 누적한다(펜스 대기 후라 이미 준비돼 있다).
+    void collectProfile() {
+        if (!profiling || tsPool == VK_NULL_HANDLE || tsFrameCount == 0) return;
+        uint64_t ts[TS_SLOTS] = {};
+        if (vkGetQueryPoolResults(device, tsPool, 0, TS_SLOTS, sizeof(ts), ts, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+        for (int i = 0; i < 11; ++i)
+            tsAccumGpu[i] += (double)(ts[i + 1] - ts[i]) * tsPeriodNs / 1e6; // ms
+
+        if (tsFrameCount % 120 == 0) {
+            double n = 120.0;
+            const char* names[11] = {"compute","shadow","ASTEROID","BODIES","SKYBOX","GALAXY","orbits","SUN","blur","post","tail"};
+            std::cout << "[profile] frames=" << tsFrameCount
+                      << "  cpuFrame=" << (tsAccumCpuFrame / n) << "ms"
+                      << "  cpuRecord=" << (tsAccumCpuRecord / n) << "ms  | GPU: ";
+            double gpuTotal = 0;
+            for (int i = 0; i < 11; ++i) { std::cout << names[i] << "=" << (tsAccumGpu[i] / n) << " "; gpuTotal += tsAccumGpu[i] / n; }
+            std::cout << " gpuTotal=" << gpuTotal << "ms\n";
+
+            // 실제로 어느 LOD에 몇 개가 들어갔는지(updateUniformBuffer에서 떠 둔 스냅샷).
+            {
+                const VkDrawIndexedIndirectCommand* cmds = lastDrawCmds;
+                uint32_t perLod[3] = {}, tris[3] = {};
+                for (int lod = 0; lod < 3; ++lod)
+                    for (int type = 0; type < 4; ++type) {
+                        const auto& c = cmds[lod * 4 + type];
+                        perLod[lod] += c.instanceCount;
+                        tris[lod] += c.instanceCount * (c.indexCount / 3);
+                    }
+                std::cout << "[lodmix] LOD0=" << perLod[0] << " LOD1=" << perLod[1] << " LOD2=" << perLod[2]
+                          << " (전체 " << (perLod[0] + perLod[1] + perLod[2]) << "/" << asteroidTransforms.size() << ")"
+                          << "  삼각형: LOD0=" << tris[0] << " LOD1=" << tris[1] << " LOD2=" << tris[2]
+                          << " 합계=" << (tris[0] + tris[1] + tris[2]) << "\n";
+            }
+            std::cout << std::flush;
+            for (int i = 0; i < 11; ++i) tsAccumGpu[i] = 0.0;
+            tsAccumCpuRecord = tsAccumCpuFrame = 0.0;
+        }
+    }
+
     void initApp() override {
         loadSettings();
+        initProfiling();
+        // 진단용: 시작 시 특정 행성에 잠근다(SOLAR_LOCK=5 → 목성). 카메라를 직접 몰지 않고
+        // 셰도우 맵 같은 시점 의존 기능을 재현하려고 둔 것이다.
+        if (const char* lk = std::getenv("SOLAR_LOCK")) {
+            lockedTargetType = 1; lockedPlanetIndex = std::atoi(lk);
+            std::cout << "[lock] planets[" << lockedPlanetIndex << "]\n";
+        }
         msaaSamples = clampMsaaLevel(settings.msaaLevel);
         appliedResolutionIndex = -1; // 강제로 첫 프레임에 해상도 적용
         appliedVsync = settings.vsync;
@@ -644,17 +742,18 @@ protected:
             loadObjModel(objPaths[i], highLodIndexCount[i], highLodFirstIndex[i], highLodVertexOffset[i]);
         }
 
-        // 2. 중간 화질(Mid LOD) 뼈대 생성
-        midLodVertexOffset = static_cast<int32_t>(vertices.size());
-        midLodFirstIndex = static_cast<uint32_t>(indices.size());
-        generateSphere(1.0f, 16, 16); 
-        midLodIndexCount = static_cast<uint32_t>(indices.size()) - midLodFirstIndex;
+        // 2. 중간 화질(Mid LOD): 타입별 원본을 정점 클러스터링으로 단순화한다.
+        //    실루엣이 바위로 남아 LOD 0에서 넘어올 때 형태가 튀지 않는다.
+        for (int i = 0; i < 4; i++) {
+            buildSimplifiedLod(highLodFirstIndex[i], highLodIndexCount[i], highLodVertexOffset[i], 12,
+                               midLodIndexCount[i], midLodFirstIndex[i], midLodVertexOffset[i]);
+        }
 
-        // 3. 최하 화질(Low LOD) 뼈대 생성
-        lowLodVertexOffset = static_cast<int32_t>(vertices.size());
-        lowLodFirstIndex = static_cast<uint32_t>(indices.size());
-        generateSphere(1.0f, 6, 6); 
-        lowLodIndexCount = static_cast<uint32_t>(indices.size()) - lowLodFirstIndex;
+        // 3. 최하 화질(Low LOD): 같은 방식으로 훨씬 거칠게 줄인다.
+        for (int i = 0; i < 4; i++) {
+            buildSimplifiedLod(highLodFirstIndex[i], highLodIndexCount[i], highLodVertexOffset[i], 5,
+                               lowLodIndexCount[i], lowLodFirstIndex[i], lowLodVertexOffset[i]);
+        }
 
         // 엔진 필수 리소스 초기화 (삭제 불가)
         createCubeTextureImage();
@@ -701,7 +800,9 @@ protected:
         
         // 3. 외행성 (목성계 확장에 따른 연쇄 이동 적용)
         planets.push_back(createPlanet("Jupiter", 9, 0.80f, 22.00f, 4.50f, 0.048f, 60.6f, 3.13f, 1.3f, 14.0f, 100.0f, 45.0f, 30.0f, false, "textures/planets/jupiter.jpg", "", "", "", "")); // index 5 (위성 부모)
-        planets.push_back(createPlanet("Saturn", 9, 0.70f, 34.00f, 3.30f, 0.056f, 56.0f, 26.73f, 2.49f, 92.0f, 113.0f, 150.0f, 120.0f, false, "textures/planets/saturn.jpg", "", "", "", ""));  // index 6 (타이탄 부모)
+        // 마지막 인자(clouds 슬롯)에 고리 텍스처를 넣는다. 가스 행성은 구름 맵을 쓰지 않으므로
+        // 이 슬롯이 비어 있고, 셰이더가 여기서 고리 밀도를 읽어 본체에 그림자를 드리운다.
+        planets.push_back(createPlanet("Saturn", 9, 0.70f, 34.00f, 3.30f, 0.056f, 56.0f, 26.73f, 2.49f, 92.0f, 113.0f, 150.0f, 120.0f, false, "textures/planets/saturn.jpg", "", "", "", "textures/planets/saturn_ring.png"));  // index 6 (타이탄 부모)
         planets.push_back(createPlanet("Uranus", 9, 0.40f, 48.00f, 2.50f, 0.046f, 34.8f, 97.77f, 0.77f, 170.0f, 74.0f, 280.0f, 250.0f, false, "textures/planets/uranus.jpg", "", "", "", ""));  // index 7
         planets.push_back(createPlanet("Neptune", 9, 0.39f, 62.00f, 2.00f, 0.009f, 37.2f, 28.32f, 1.77f, 44.0f, 131.0f, 90.0f, 80.0f, false, "textures/planets/neptune.jpg", "", "", "", ""));  // index 8
         
@@ -819,6 +920,66 @@ protected:
         return result;
     }
 
+    // 원본 메시를 정점 클러스터링으로 단순화해 vertices/indices 뒤에 덧붙인다.
+    // 바운딩 박스를 gridRes^3 격자로 나누고, 같은 칸에 떨어진 정점들을 대표점 하나로 합친다.
+    // 두 정점 이상이 같은 칸으로 뭉개진 삼각형은 사라지므로 면 수가 크게 준다.
+    // 소행성처럼 덩어리진 형태는 이 방식으로도 실루엣이 잘 남는다.
+    void buildSimplifiedLod(uint32_t srcFirstIndex, uint32_t srcIndexCount, int32_t srcVertexOffset,
+                            int gridRes,
+                            uint32_t& outIndexCount, uint32_t& outFirstIndex, int32_t& outVertexOffset) {
+        glm::vec3 lo(FLT_MAX), hi(-FLT_MAX);
+        for (uint32_t i = 0; i < srcIndexCount; ++i) {
+            const glm::vec3& p = vertices[srcVertexOffset + indices[srcFirstIndex + i]].pos;
+            lo = glm::min(lo, p); hi = glm::max(hi, p);
+        }
+        glm::vec3 extent = glm::max(hi - lo, glm::vec3(1e-6f));
+
+        auto cellOf = [&](const glm::vec3& p) {
+            glm::ivec3 c = glm::ivec3(glm::clamp((p - lo) / extent * (float)gridRes, glm::vec3(0.0f), glm::vec3(gridRes - 1)));
+            return (c.x * gridRes + c.y) * gridRes + c.z;
+        };
+
+        // 칸별로 정점을 평균내어 대표점을 만든다(격자 중심보다 원형이 덜 깨진다).
+        std::unordered_map<int, std::pair<Vertex, int>> reps;
+        for (uint32_t i = 0; i < srcIndexCount; ++i) {
+            const Vertex& v = vertices[srcVertexOffset + indices[srcFirstIndex + i]];
+            int cell = cellOf(v.pos);
+            auto it = reps.find(cell);
+            if (it == reps.end()) { reps.emplace(cell, std::make_pair(v, 1)); }
+            else {
+                it->second.first.pos += v.pos;
+                it->second.first.normal += v.normal;
+                it->second.first.texCoord += v.texCoord;
+                it->second.second++;
+            }
+        }
+
+        outVertexOffset = static_cast<int32_t>(vertices.size());
+        outFirstIndex = static_cast<uint32_t>(indices.size());
+
+        std::unordered_map<int, uint32_t> cellToIndex;
+        for (auto& kv : reps) {
+            Vertex v = kv.second.first;
+            float n = (float)kv.second.second;
+            v.pos /= n; v.texCoord /= n;
+            v.normal = (glm::length(v.normal) > 1e-6f) ? glm::normalize(v.normal) : glm::vec3(0, 1, 0);
+            cellToIndex[kv.first] = static_cast<uint32_t>(vertices.size()) - static_cast<uint32_t>(outVertexOffset);
+            vertices.push_back(v);
+        }
+
+        for (uint32_t i = 0; i + 2 < srcIndexCount; i += 3) {
+            int c0 = cellOf(vertices[srcVertexOffset + indices[srcFirstIndex + i + 0]].pos);
+            int c1 = cellOf(vertices[srcVertexOffset + indices[srcFirstIndex + i + 1]].pos);
+            int c2 = cellOf(vertices[srcVertexOffset + indices[srcFirstIndex + i + 2]].pos);
+            if (c0 == c1 || c1 == c2 || c0 == c2) continue; // 축퇴 삼각형은 버린다
+            indices.push_back(cellToIndex[c0]);
+            indices.push_back(cellToIndex[c1]);
+            indices.push_back(cellToIndex[c2]);
+        }
+        outIndexCount = static_cast<uint32_t>(indices.size()) - outFirstIndex;
+        std::cout << "[lod] simplified " << (srcIndexCount / 3) << " -> " << (outIndexCount / 3) << " tris\n";
+    }
+
     void loadObjModel(const std::string& path, uint32_t& outIndexCount, uint32_t& outFirstIndex, int32_t& outVertexOffset) {
         tinyobj::attrib_t attrib; std::vector<tinyobj::shape_t> shapes; std::vector<tinyobj::material_t> materials; std::string warn, err;
         outVertexOffset = static_cast<int32_t>(vertices.size());
@@ -884,7 +1045,11 @@ protected:
         memcpy(inData, asteroidTransforms.data(), inputSize);
         vkUnmapMemory(device, computeInputMem);
 
-        VkDeviceSize outputSize = 240000 * sizeof(glm::mat4);
+        // 각 소행성은 12개 바구니 중 정확히 하나로 들어가지만, 어느 바구니에 몰릴지는
+        // 시점에 따라 달라진다. 한 바구니가 전부를 받아도 넘치지 않도록 잡는다.
+        // (예전엔 20000이 박혀 있어, 생성한 40000개 중 절반이 아예 그려지지 않았다)
+        asteroidBucketCapacity = static_cast<uint32_t>(asteroidTransforms.size());
+        VkDeviceSize outputSize = (VkDeviceSize)12 * asteroidBucketCapacity * sizeof(glm::mat4);
         createBuffer(outputSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, computeOutputBuffer, computeOutputMem);
 
         VkDeviceSize indirectSize = 12 * sizeof(VkDrawIndexedIndirectCommand);
@@ -895,10 +1060,10 @@ protected:
             for (int type = 0; type < 4; ++type) {
                 int bucket = lod * 4 + type;
                 drawCmdTemplates[bucket].instanceCount = 0;
-                drawCmdTemplates[bucket].firstInstance = bucket * 20000;
+                drawCmdTemplates[bucket].firstInstance = bucket * asteroidBucketCapacity;
                 if (lod == 0) { drawCmdTemplates[bucket].indexCount = highLodIndexCount[type]; drawCmdTemplates[bucket].firstIndex = highLodFirstIndex[type]; drawCmdTemplates[bucket].vertexOffset = highLodVertexOffset[type]; }
-                else if (lod == 1) { drawCmdTemplates[bucket].indexCount = midLodIndexCount; drawCmdTemplates[bucket].firstIndex = midLodFirstIndex; drawCmdTemplates[bucket].vertexOffset = midLodVertexOffset; }
-                else { drawCmdTemplates[bucket].indexCount = lowLodIndexCount; drawCmdTemplates[bucket].firstIndex = lowLodFirstIndex; drawCmdTemplates[bucket].vertexOffset = lowLodVertexOffset; }
+                else if (lod == 1) { drawCmdTemplates[bucket].indexCount = midLodIndexCount[type]; drawCmdTemplates[bucket].firstIndex = midLodFirstIndex[type]; drawCmdTemplates[bucket].vertexOffset = midLodVertexOffset[type]; }
+                else { drawCmdTemplates[bucket].indexCount = lowLodIndexCount[type]; drawCmdTemplates[bucket].firstIndex = lowLodFirstIndex[type]; drawCmdTemplates[bucket].vertexOffset = lowLodVertexOffset[type]; }
             }
         }
         memcpy(indirectDrawMapped, drawCmdTemplates, indirectSize);
@@ -929,7 +1094,10 @@ protected:
         VkShaderModule compMod = createShaderModule(compCode);
         VkPipelineShaderStageCreateInfo stageInfo{}; stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT; stageInfo.module = compMod; stageInfo.pName = "main";
         
+        // LOD 판정을 렌더 좌표계에서 하기 위한 벨트 행렬 + 실제 소행성 개수.
+        VkPushConstantRange compPush{}; compPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; compPush.offset = 0; compPush.size = sizeof(AsteroidCullPush);
         VkPipelineLayoutCreateInfo pLayoutInfo{}; pLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayoutInfo.setLayoutCount = 1; pLayoutInfo.pSetLayouts = &computeDescriptorSetLayout;
+        pLayoutInfo.pushConstantRangeCount = 1; pLayoutInfo.pPushConstantRanges = &compPush;
         vkCreatePipelineLayout(device, &pLayoutInfo, nullptr, &computePipelineLayout);
         
         VkComputePipelineCreateInfo pipelineInfo{}; pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; pipelineInfo.stage = stageInfo; pipelineInfo.layout = computePipelineLayout;
@@ -1097,6 +1265,7 @@ protected:
         uint32_t w = std::max(1u, (uint32_t)std::lround(swapChainExtent.width  * settings.renderScale));
         uint32_t h = std::max(1u, (uint32_t)std::lround(swapChainExtent.height * settings.renderScale));
         renderExtent = {w, h};
+        blurExtent = {std::max(1u, w / 2), std::max(1u, h / 2)};
     }
 
     void createOffscreenImages() {
@@ -1164,7 +1333,7 @@ protected:
     void createBlurImages() {
         VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
         auto makeImg = [&](VkImage& img, VkDeviceMemory& mem, VkImageView& view) {
-            VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = renderExtent.width; iInfo.extent.height = renderExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = colorFormat; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = blurExtent.width; iInfo.extent.height = blurExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = colorFormat; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             vkCreateImage(device, &iInfo, nullptr, &img);
             VkMemoryRequirements mReqs; vkGetImageMemoryRequirements(device, img, &mReqs);
             VkMemoryAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; aInfo.allocationSize = mReqs.size; aInfo.memoryTypeIndex = findMemoryType(mReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -1176,7 +1345,7 @@ protected:
         for(int i = 0; i < 2; i++) makeImg(blurImages[i], blurMemories[i], blurViews[i]);
 
         for(int i = 0; i < 2; i++) {
-            VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = blurRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &blurViews[i]; fbInfo.width = renderExtent.width; fbInfo.height = renderExtent.height; fbInfo.layers = 1;
+            VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = blurRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &blurViews[i]; fbInfo.width = blurExtent.width; fbInfo.height = blurExtent.height; fbInfo.layers = 1;
             vkCreateFramebuffer(device, &fbInfo, nullptr, &blurFramebuffers[i]);
         }
     }
@@ -1555,24 +1724,72 @@ protected:
         ubo.earthPos = relativeToCamera(planets[2].currentPosition); ubo.earthRadius = planets[2].radius;
         ubo.moonPos = relativeToCamera(moon.currentPosition); ubo.moonRadius = moon.radius;
 
-        // 태양(원점)에 고정된 상태면 태양 자신을 그림자 초점으로 삼을 수 없으므로 지구로 대체한다.
-        glm::dvec3 shadowFocusWorld = nextTarget;
-        if (lockedTargetType == 0) shadowFocusWorld = planets[2].currentPosition;
-        glm::vec3 shadowFocusPos = relativeToCamera(shadowFocusWorld);
+        // ── 그림자를 주고받을 '계(系)'를 정한다 ──────────────────────────────
+        // 잠근 대상이 위성이면 모행성계로 올라가고, 행성이면 자기 위성들을 모은다.
+        shadowSystemIndices.clear();
+        shadowSystemIncludesEarthMoon = false;
+        int primary = 2; // 기본값: 지구(태양에 고정됐거나 대상이 없을 때)
+        if (lockedTargetType == 1 && lockedPlanetIndex >= 0 && lockedPlanetIndex < (int)planets.size()) {
+            primary = planets[lockedPlanetIndex].parentIndex;
+            if (primary == -1) primary = lockedPlanetIndex; // 이미 행성이다
+        }
+        shadowSystemIndices.push_back(primary);
+        for (int i = 0; i < (int)planets.size(); ++i)
+            if (planets[i].parentIndex == primary) shadowSystemIndices.push_back(i);
+        if (primary == 2) shadowSystemIncludesEarthMoon = true; // 달은 planets 밖에 따로 있다
+
+        // 계 전체를 감싸는 반경(모행성 기준). 위성 궤도가 가장 먼 것에 맞춘다.
+        glm::dvec3 primaryPos = planets[primary].currentPosition;
+        float systemRadius = glm::mix(planets[primary].radius, planets[primary].realRadius, easeScale);
+        for (int i : shadowSystemIndices)
+            systemRadius = std::max(systemRadius, (float)glm::distance(planets[i].currentPosition, primaryPos)
+                                                 + glm::mix(planets[i].radius, planets[i].realRadius, easeScale));
+        if (shadowSystemIncludesEarthMoon)
+            systemRadius = std::max(systemRadius, (float)glm::distance(moon.currentPosition, primaryPos)
+                                                 + glm::mix(moon.radius, moon.realRadius, easeScale));
+
+        glm::vec3 shadowFocusPos = relativeToCamera(primaryPos);
         glm::vec3 sunPosRel = relativeToCamera(sun.currentPosition);
 
         glm::vec3 lightDir = glm::normalize(shadowFocusPos - sunPosRel);
         glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
         if(abs(glm::dot(lightDir, up)) > 0.99f) up = glm::vec3(0.0f, 0.0f, 1.0f);
         glm::mat4 lightView = glm::lookAt(sunPosRel, shadowFocusPos, up);
-        float orthoSize = targetRadius * 5.0f + 2.0f; 
-        if (lockedTargetType == 0) orthoSize = 30.0f;
-        
-        glm::mat4 lightProj = glm::ortho(-orthoSize, orthoSize, -orthoSize, orthoSize, 0.1f, 200.0f);
+
+        // 상자를 계에 딱 맞춘다(여유 10%). 좁을수록 텍셀이 촘촘해져 위성 그림자가 또렷해진다.
+        float orthoSize = systemRadius * 1.1f;
+
+        // 근/원 평면은 태양-계 거리에 맞춰 잡는다. 예전엔 0.1~200 고정이라 리얼 스케일에서
+        // 궤도가 수천 단위로 늘어나면 계 전체가 원평면 밖으로 나가 그림자가 아예 사라졌다.
+        float sunDist = glm::distance(shadowFocusPos, sunPosRel);
+        float zNear = std::max(0.01f, sunDist - systemRadius * 2.0f);
+        float zFar  = sunDist + systemRadius * 2.0f;
+        glm::mat4 lightProj = glm::ortho(-orthoSize, orthoSize, -orthoSize, orthoSize, zNear, zFar);
         lightProj[1][1] *= -1;
         ubo.lightSpaceMatrix = lightProj * lightView;
+
+        // 셰도우 맵 진단: 천체들이 광원 클립 공간 어디에 떨어지는지 확인한다.
+        // xy는 [-1,1], z는 [0,1] 안에 들어와야 셰도우 맵에 기록된다.
+        if (profiling && tsFrameCount % 240 == 0) {
+            auto dump = [&](const char* nm, const glm::dvec3& wp) {
+                glm::vec4 c = ubo.lightSpaceMatrix * glm::vec4(relativeToCamera(wp), 1.0f);
+                glm::vec3 n = glm::vec3(c) / c.w;
+                std::cout << "  [shadow] " << nm << " ndc=(" << n.x << ", " << n.y << ", " << n.z << ")"
+                          << (fabs(n.x) <= 1 && fabs(n.y) <= 1 && n.z >= 0 && n.z <= 1 ? "  OK" : "  <== 범위밖") << "\n";
+            };
+            std::cout << "[shadow] orthoSize=" << orthoSize << " systemRadius=" << systemRadius
+                      << " zNear=" << zNear << " zFar=" << zFar << "\n";
+            for (int i : shadowSystemIndices) dump(planets[i].name.c_str(), planets[i].currentPosition);
+            if (shadowSystemIncludesEarthMoon) dump("Moon", moon.currentPosition);
+            std::cout << std::flush;
+        }
         
         memcpy(uniformBufferMapped, &ubo, sizeof(ubo));
+
+        // 여기는 펜스 대기 뒤라 직전 프레임의 컴퓨트 결과가 확정돼 있다. 0으로 리셋하기
+        // 직전에 스냅샷을 떠 둔다(onFrameStart에서 읽으면 아직 GPU가 채우기 전이라 0이 나온다).
+        if (profiling && indirectDrawMapped)
+            memcpy(lastDrawCmds, indirectDrawMapped, 12 * sizeof(VkDrawIndexedIndirectCommand));
 
         memcpy(indirectDrawMapped, drawCmdTemplates, 12 * sizeof(VkDrawIndexedIndirectCommand));
 
@@ -1869,21 +2086,48 @@ protected:
     }
     void setFullViewport(VkCommandBuffer cb) { setViewport(cb, swapChainExtent); } // 포스트/스왑체인 패스용
 
+    // 계측용: 패스 경계마다 타임스탬프를 찍는다. profiling이 꺼져 있으면 아무 일도 안 한다.
+    void tsMark(VkCommandBuffer cb, uint32_t slot) {
+        if (!profiling || tsPool == VK_NULL_HANDLE) return;
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, tsPool, slot);
+    }
+
     void recordCommandBuffer(VkCommandBuffer cb, uint32_t imageIndex) override {
+        double recordStart = glfwGetTime();
         VkCommandBufferBeginInfo beginInfo{}; beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         vkBeginCommandBuffer(cb, &beginInfo);
+        if (profiling && tsPool != VK_NULL_HANDLE) vkCmdResetQueryPool(cb, tsPool, 0, TS_SLOTS);
+        tsMark(cb, 0);
+
+        // 벨트 행렬은 컴퓨트(LOD 판정)와 그래픽스(실제 그리기)가 똑같은 것을 써야 한다.
+        // 예전에는 컴퓨트가 이걸 몰라서 소행성의 '절대 월드 좌표'를 '카메라 상대 좌표'인
+        // ubo.cameraPos와 빼는 바람에, 사실상 원점(태양)과의 거리를 재고 있었다. 그 결과
+        // 두 벨트 전부가 항상 최고 LOD로 떨어져 매 프레임 수천만 삼각형을 그렸다.
+        float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp);
+        // 행성들의 평균 팽창 비율(약 200배)을 스케일에 곱해 벨트 전체를 우주 외곽으로 밀어냅니다.
+        float beltScale = glm::mix(1.0f, 200.0f, easeScale);
+        // 소행성 행렬(SSBO)은 월드 원점 기준이므로, 원점을 렌더 좌표계로 옮겨 앞에 붙인다.
+        glm::mat4 astRot = glm::translate(glm::mat4(1.0f), relativeToCamera(glm::dvec3(0.0)))
+                         * glm::rotate(glm::mat4(1.0f), currentAppTime * 0.05f, glm::vec3(0.0f, 1.0f, 0.0f));
+        astRot = glm::scale(astRot, glm::vec3(beltScale)); // 전체 입자에 스케일 적용!
 
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
-        
+        // 정점 셰이더가 쓰는 것과 동일한 행렬을 넘겨, 컴퓨트가 렌더 좌표계에서 거리를 재게 한다.
+        AsteroidCullPush cullPush{astRot, static_cast<uint32_t>(asteroidTransforms.size())};
+        vkCmdPushConstants(cb, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cullPush), &cullPush);
+
         uint32_t groupCount = (static_cast<uint32_t>(asteroidTransforms.size()) + 255) / 256;
-        vkCmdDispatch(cb, groupCount, 1, 1); 
+        vkCmdDispatch(cb, groupCount, 1, 1);
 
         VkMemoryBarrier barrier{}; barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; 
-        barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT; 
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        // HOST_READ는 계측이 인스턴스 수를 CPU에서 읽기 위해 필요하다(HOST_COHERENT 메모리라도
+        // 배리어 없이는 가시성이 보장되지 않는다). 계측이 꺼져 있으면 비용은 무시할 수준이다.
+        barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
+        tsMark(cb, 1);
         // 1. 섀도우 맵핑 패스
         VkRenderPassBeginInfo shadowPassInfo{}; shadowPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         shadowPassInfo.renderPass = shadowRenderPass; shadowPassInfo.framebuffer = shadowFramebuffer;
@@ -1903,8 +2147,14 @@ protected:
             vkCmdPushConstants(cb, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
             vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0); 
         };
-        for (const auto &planet : planets) drawShadowObject(planet, planet.currentModelMat);
-        drawShadowObject(moon, moon.currentModelMat);
+        // 현재 보고 있는 '위성계'만 그림자를 주고받는다.
+        // 실제로 행성끼리는 그림자가 닿지 않는다 — 본그림자 길이가 R_행성 x 태양거리 / R_태양라
+        // 목성도 약 0.53 AU에서 끝나는데, 목성-토성 최소 거리는 4.4 AU다. 8배 넘게 모자란다.
+        // 반면 위성 그림자는 흔하다(이오는 목성 표면까지 35만 km, 이오의 본그림자는 204만 km).
+        // 궤도를 압축해 둔 이 시뮬레이션에서는 광원 시점에서 남남인 행성이 우연히 겹쳐
+        // 비현실적인 그림자가 생기므로, 캐스터를 한 계(系)로 제한한다.
+        for (int i : shadowSystemIndices) drawShadowObject(planets[i], planets[i].currentModelMat);
+        if (shadowSystemIncludesEarthMoon) drawShadowObject(moon, moon.currentModelMat);
 
         vkCmdEndRenderPass(cb);
 
@@ -1916,22 +2166,14 @@ protected:
         clearValues[0].color = {{0.01f, 0.01f, 0.01f, 1.0f}}; clearValues[1].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; clearValues[2].depthStencil = {1.0f, 0};
         offscreenPassInfo.clearValueCount = 3; offscreenPassInfo.pClearValues = clearValues.data();
         
+        tsMark(cb, 2);
         vkCmdBeginRenderPass(cb, &offscreenPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         setViewport(cb, renderExtent);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
         vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets); vkCmdBindIndexBuffer(cb, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        // 🚀 [수정됨] 소행성대와 카이퍼벨트도 리얼 스케일 팽창 적용
-        float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp); 
-        // 행성들의 평균 팽창 비율(약 200배)을 스케일에 곱해 벨트 전체를 우주 외곽으로 밀어냅니다.
-        float beltScale = glm::mix(1.0f, 200.0f, easeScale); 
-
-        // 소행성 행렬(SSBO)은 월드 원점 기준이므로, 원점을 렌더 좌표계로 옮겨 앞에 붙인다.
-        glm::mat4 astRot = glm::translate(glm::mat4(1.0f), relativeToCamera(glm::dvec3(0.0)))
-                         * glm::rotate(glm::mat4(1.0f), currentAppTime * 0.05f, glm::vec3(0.0f, 1.0f, 0.0f));
-        astRot = glm::scale(astRot, glm::vec3(beltScale)); // 전체 입자에 스케일 적용!
-        
-        PushConstants pcAst{astRot, 8}; 
+        // easeScale / beltScale / astRot은 컴퓨트 디스패치 직전에 이미 만들어 두었다(위 참조).
+        PushConstants pcAst{astRot, 8};
         vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pcAst);
 
         for (int type = 0; type < 4; ++type) {
@@ -1943,6 +2185,7 @@ protected:
             }
         }
 
+        tsMark(cb, 3); // 소행성 그리기 끝
         auto drawObject = [&](const Planet &p, glm::mat4 mat, int type) {
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &p.descriptorSet, 0, nullptr);
             PushConstants pc{mat, type}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
@@ -1976,8 +2219,10 @@ protected:
             drawObject(moon, moon.currentModelMat, moon.typeId);
         }
         
+        tsMark(cb, 4); // 천체 본체 끝 (다음은 스카이박스)
         drawObject(sun, glm::rotate(glm::mat4(1.0f), currentAppTime * glm::radians(0.5f), glm::vec3(0.0f, 1.0f, 0.0f)), 3);
         
+        tsMark(cb, 5); // 행성/스카이박스 끝
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &milkyWay.descriptorSet, 0, nullptr);
         
         float galaxyDrop = glm::mix(-15.0f, -2000.0f, scaleLerp);
@@ -2009,6 +2254,7 @@ protected:
         // =========================================================
         // 🚀 궤도선 렌더링 구역
         // =========================================================
+        tsMark(cb, 6); // 은하 끝
         if (showOrbits) {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipeline);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sun.descriptorSet, 0, nullptr);
@@ -2059,12 +2305,17 @@ protected:
         // =========================================================
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
+        tsMark(cb, 7); // 궤도선 끝
         // 3. 거대한 태양 홍염 (Type 7) - 가까우면 숨김
         if (shouldRenderSun) {
             // 🚀 [수정됨] 태양 홍염도 리얼 스케일에 맞춰 거대하게 팽창합니다.
             float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp); 
             float curSunRadius = glm::mix(sun.radius, sun.realRadius, easeScale);
             
+            // 돔 배율 2.5. 홍염 자체는 r <= 1.48까지만 존재하지만, 돔을 1.7로 줄여봤을 때
+            // 성능 차이가 측정 노이즈 수준이었다(셰이더의 r > 1.6 조기 discard가 이미
+            // 바깥 픽셀을 몇 연산 만에 버리기 때문). 그래서 원래 값을 유지한다.
+            // 이 값을 바꾸면 shader.frag의 나눗셈 상수도 같이 맞춰야 한다.
             glm::mat4 haloModel = glm::translate(glm::mat4(1.0f), relativeToCamera(sun.currentPosition)) * glm::scale(glm::mat4(1.0f), glm::vec3(curSunRadius * 2.5f));
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sun.descriptorSet, 0, nullptr);
             PushConstants haloPush{haloModel, 7}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &haloPush);
@@ -2073,12 +2324,13 @@ protected:
 
         vkCmdEndRenderPass(cb);
 
-        bool horizontal = true; int blurAmount = 6; 
+        tsMark(cb, 8);
+        bool horizontal = true; int blurAmount = 6;
         for (int i = 0; i < blurAmount; i++) {
             VkRenderPassBeginInfo blurPassInfo{}; blurPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; blurPassInfo.renderPass = blurRenderPass;
-            blurPassInfo.framebuffer = blurFramebuffers[horizontal ? 0 : 1]; blurPassInfo.renderArea.offset = {0, 0}; blurPassInfo.renderArea.extent = renderExtent;
+            blurPassInfo.framebuffer = blurFramebuffers[horizontal ? 0 : 1]; blurPassInfo.renderArea.offset = {0, 0}; blurPassInfo.renderArea.extent = blurExtent;
             VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}}; blurPassInfo.clearValueCount = 1; blurPassInfo.pClearValues = &clearColor;
-            vkCmdBeginRenderPass(cb, &blurPassInfo, VK_SUBPASS_CONTENTS_INLINE); setViewport(cb, renderExtent); vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline);
+            vkCmdBeginRenderPass(cb, &blurPassInfo, VK_SUBPASS_CONTENTS_INLINE); setViewport(cb, blurExtent); vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline);
             int setIndex = (i == 0) ? 0 : (horizontal ? 2 : 1);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipelineLayout, 0, 1, &blurDescriptorSets[setIndex], 0, nullptr);
             int horizInt = horizontal ? 1 : 0; vkCmdPushConstants(cb, blurPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(int), &horizInt);
@@ -2090,6 +2342,7 @@ protected:
         std::array<VkClearValue, 2> swapClear{}; swapClear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; swapClear[1].depthStencil = {1.0f, 0};
         renderPassInfo.clearValueCount = 2; renderPassInfo.pClearValues = swapClear.data();
         
+        tsMark(cb, 9);
         vkCmdBeginRenderPass(cb, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         setFullViewport(cb);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipeline);
@@ -2099,7 +2352,10 @@ protected:
         vkCmdDraw(cb, 3, 1, 0, 0);
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cb);
         vkCmdEndRenderPass(cb);
+        tsMark(cb, 10);
+        tsMark(cb, 11);
         vkEndCommandBuffer(cb);
+        tsAccumCpuRecord += (glfwGetTime() - recordStart) * 1000.0;
     }
 
     void cleanupApp() override {
@@ -2165,12 +2421,24 @@ private:
         createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
         void *data; vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data); memcpy(data, pixels, static_cast<size_t>(imageSize)); vkUnmapMemory(device, stagingBufferMemory);
         stbi_image_free(pixels);
-        createImage(texWidth, texHeight, format, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, img, mem);
-        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        // 밉맵 체인. 8K 텍스처가 화면에서 수백 픽셀로 축소되면 밉맵 없이는 텍스처 캐시가
+        // 거의 매번 빗나가고 축소 지글거림(shimmering)도 생긴다. blit이 안 되는 포맷이면
+        // 레벨 1개로 물러난다(기존 동작과 동일).
+        uint32_t mipLevels = 1;
+        if (supportsLinearBlit(format))
+            mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
+
+        VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (mipLevels > 1) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // blit 소스로도 쓰인다
+        createImage(texWidth, texHeight, format, VK_IMAGE_TILING_OPTIMAL, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, img, mem, mipLevels);
+        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, mipLevels);
         copyBufferToImage(stagingBuffer, img, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (mipLevels > 1)
+            generateMipmaps(img, texWidth, texHeight, mipLevels); // 전 레벨을 SHADER_READ_ONLY로 남긴다
+        else
+            transitionImageLayout(img, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
-        view = createImageView(img, format, VK_IMAGE_ASPECT_COLOR_BIT);
+        view = createImageView(img, format, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, 1, mipLevels);
         allImages.push_back(img); allMemories.push_back(mem); allViews.push_back(view); return view;
     }
 
@@ -2452,6 +2720,9 @@ private:
     // 궤도 자체는 부모(태양 또는 모행성) 기준이므로 부모 위치를 더해 월드 좌표를 만든 뒤 상대화한다.
     void updateLockedOrbitLine(float easeScale, float slowTime) {
         lockedOrbitValid = false;
+        // 궤도선이 꺼져 있으면 결과를 그릴 곳이 없다. 아래 루프는 16384개 점을 double로
+        // 계산해 매 프레임 GPU에 올리므로, 여기서 빠져나가는 것만으로 큰 낭비가 사라진다.
+        if (!settings.orbitLines) return;
         if (lockedTargetType != 1 || lockedPlanetIndex < 0 || lockedPlanetIndex >= (int)planets.size()) return;
 
         const Planet& p = planets[lockedPlanetIndex];
@@ -2512,7 +2783,27 @@ private:
     }
 
     void createUniformBuffer() { VkDeviceSize bufferSize = sizeof(UniformBufferObject); createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffer, uniformBufferMemory); vkMapMemory(device, uniformBufferMemory, 0, bufferSize, 0, &uniformBufferMapped); }
-    void createTextureSampler() { VkSamplerCreateInfo samplerInfo{}; samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO; samplerInfo.magFilter = VK_FILTER_LINEAR; samplerInfo.minFilter = VK_FILTER_LINEAR; samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.anisotropyEnable = VK_FALSE; samplerInfo.compareEnable = VK_FALSE; samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR; vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler); }
+    void createTextureSampler() {
+        // 이방성 필터링은 디바이스 기능으로 이미 켜져 있다(createLogicalDevice의 samplerAnisotropy).
+        // 구체에 감긴 텍스처는 시선이 비스듬히 닿는 가장자리에서 특히 뭉개지므로 효과가 크다.
+        VkPhysicalDeviceProperties devProps{};
+        vkGetPhysicalDeviceProperties(physicalDevice, &devProps);
+
+        VkSamplerCreateInfo samplerInfo{}; samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR; samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.anisotropyEnable = VK_TRUE;
+        // 8x와 16x는 눈으로 구분이 거의 안 되는데 페치 비용은 두 배 차이다.
+        // 성능이 아쉬우면 이 숫자를 4.0f로 내리거나 anisotropyEnable을 끄면 된다.
+        samplerInfo.maxAnisotropy = std::min(8.0f, devProps.limits.maxSamplerAnisotropy);
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        // 밉 레벨이 1개뿐인 이미지(더미·UI 아이콘·스카이박스)는 뷰의 levelCount가 알아서
+        // 클램프하므로, 여기서 상한을 풀어도 안전하다.
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+        vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler);
+    }
 };
 
 #ifdef _WIN32

@@ -27,10 +27,11 @@ layout(std430, binding = 1) readonly buffer InAsteroids {
     AsteroidData inAsteroids[];
 };
 
-// 3. 셰이더가 거리를 계산해서 다시 분리해 넣을 12구역의 거대한 출력 바구니 
-// (20000개씩 12종류 = 240,000칸)
+// 3. 셰이더가 LOD별로 다시 분리해 넣을 12구역의 출력 바구니.
+// 크기는 C++이 소행성 개수에 맞춰 잡으므로 여기서는 열어둔다(각 바구니의 시작 위치는
+// draws[].firstInstance가 알려준다).
 layout(std430, binding = 2) writeonly buffer OutMatrices {
-    mat4 outMatrices[240000];
+    mat4 outMatrices[];
 };
 
 // 4. 대망의 'GPU 간접 그리기 명령어 (Indirect Draw Command)'
@@ -40,7 +41,7 @@ struct DrawCommand {
     uint instanceCount; // ★ 이번 프레임에 그려질 소행성 개수 (우리가 Atomic으로 숫자를 올릴 곳)
     uint firstIndex;    // 인덱스 버퍼 시작점
     int  vertexOffset;  // 버텍스 오프셋
-    uint firstInstance; // 배열 내 시작 위치 (0, 20000, 40000 ...)
+    uint firstInstance; // 배열 내 시작 위치 (바구니 번호 x 전체 소행성 수). C++이 채워준다.
 };
 
 layout(std430, binding = 3) buffer DrawCommands {
@@ -48,44 +49,110 @@ layout(std430, binding = 3) buffer DrawCommands {
 };
 
 // 한 번에 256개의 GPU 코어(Thread)가 동시에 투입됩니다.
+// 정점 셰이더의 push.model과 같은 벨트 행렬(원점 이동 + 회전 + 리얼스케일 팽창).
+// 이걸 곱해야 소행성 위치가 ubo.cameraPos와 같은 렌더 좌표계에 놓인다.
+layout(push_constant) uniform BeltPush {
+    mat4 beltModel;
+    uint asteroidCount; // 실제 소행성 개수. 예전엔 20000이 박혀 있어 절반이 안 그려졌다.
+} push;
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// 워크그룹 단위로 바구니별 개수를 먼저 모은 뒤, 전역 카운터는 워크그룹당 한 번만 건드린다.
+// 예전에는 소행성 4만 개가 전역 카운터 12개에 직접 atomicAdd를 때려 경합이 심했다.
+shared uint sBucketCount[12]; // 이 워크그룹이 각 바구니에 넣을 개수
+shared uint sBucketBase[12];  // 전역 배열에서 이 워크그룹이 받은 시작 위치
+
+// 시야 밖 소행성은 그려도 화면에 안 나오므로 아예 목록에서 뺀다(화면상 변화 없음).
+// viewProj에서 프러스텀 6면을 뽑아 구(球) 판정한다. 경계에서 튀지 않도록 반지름은 넉넉히 잡는다.
+bool insideFrustum(vec3 center, float radius) {
+    mat4 vp = ubo.proj * ubo.view;
+    // 열 우선 mat4에서 i번째 '행'을 꺼낸다.
+    vec4 r0 = vec4(vp[0][0], vp[1][0], vp[2][0], vp[3][0]);
+    vec4 r1 = vec4(vp[0][1], vp[1][1], vp[2][1], vp[3][1]);
+    vec4 r2 = vec4(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);
+    vec4 r3 = vec4(vp[0][3], vp[1][3], vp[2][3], vp[3][3]);
+
+    vec4 planes[6];
+    planes[0] = r3 + r0; // left
+    planes[1] = r3 - r0; // right
+    planes[2] = r3 + r1; // bottom
+    planes[3] = r3 - r1; // top
+    planes[4] = r2;      // near (Vulkan 깊이 0..1)
+    planes[5] = r3 - r2; // far
+
+    for (int i = 0; i < 6; ++i) {
+        float len = length(planes[i].xyz);
+        if (len < 1e-8) continue;
+        if ((dot(planes[i].xyz, center) + planes[i].w) / len < -radius) return false;
+    }
+    return true;
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= 20000) return; // 전체 소행성 개수를 넘어가면 스레드 종료
+    uint lid = gl_LocalInvocationID.x;
 
-    AsteroidData ast = inAsteroids[idx];
+    // 범위를 벗어난 스레드도 barrier에는 참여해야 하므로 여기서 return하지 않는다.
+    bool valid = (idx < push.asteroidCount);
 
-    // 1. 소행성 공전 애니메이션 수학 (CPU의 astRot를 GPU로 가져왔습니다!)
-    float t = ubo.time * 0.05;
-    float c = cos(t);
-    float s = sin(t);
-    mat4 astRot = mat4(
-        c, 0, -s, 0,
-        0, 1,  0, 0,
-        s, 0,  c, 0,
-        0, 0,  0, 1
-    );
+    if (lid < 12) { sBucketCount[lid] = 0; }
+    barrier();
 
-    mat4 finalTransform = astRot * ast.transform;
-    vec3 worldPos = vec3(finalTransform[3]);
+    AsteroidData ast = inAsteroids[valid ? idx : 0];
+
+    // 1. 공전 회전은 push.beltModel에 이미 들어 있다. 예전에는 여기서도 한 번 더 곱한 뒤
+    // 그 결과를 그대로 내보내, 정점 셰이더에서 push.model과 다시 곱해지며 회전이 두 번
+    // 적용됐다(벨트가 의도한 0.05의 2배 속도로 돌았다).
+    mat4 finalTransform = ast.transform;
 
     // 2. 카메라와의 거리 계산 및 LOD 판별
-    float dist = distance(worldPos, ubo.cameraPos);
-    int lod = 2; // 기본 저화질
-    // 임계값을 넓혀 훨씬 많은 소행성이 실제 모델로 보이게 한다. LOD 메시는 전 인스턴스가
-    // 공유하므로 메모리는 늘지 않고, 정점 처리량만 늘어난다(프러스텀 컬링으로 상쇄 예정).
-    if (dist < 120.0) lod = 0;      // 최고화질(실제 모델)
-    else if (dist < 260.0) lod = 1; // 중간화질
+    // 정점 셰이더는 push.model * finalTransform으로 그린다. LOD도 반드시 같은 좌표계에서
+    // 재야 한다 — 예전처럼 finalTransform의 절대 좌표를 그대로 쓰면, 카메라 상대 좌표인
+    // ubo.cameraPos와 비교하는 셈이라 사실상 원점과의 거리를 재게 되고 LOD가 무력화된다.
+    mat4 fullModel = push.beltModel * finalTransform;
+    vec3 renderPos = vec3(fullModel[3]);
+    float dist = max(distance(renderPos, ubo.cameraPos), 1e-4);
 
-    // 3. 12개의 바구니 중 어디로 들어갈지 번호 계산 (0 ~ 11)
+    // 거리 대신 '화면에서 차지하는 크기'로 LOD를 고른다.
+    // 소행성 반지름은 0.008~0.025인데 벨트 반지름이 9~12, 태양계 전체가 100 이내다.
+    // 그래서 예전의 거리 임계값(120)은 사실상 '항상 최고 LOD'와 같은 말이었고,
+    // 화면에서 1픽셀도 안 되는 소행성 2만 개를 매 프레임 풀 메시로 그리고 있었다.
+    // 비율로 재면 리얼 스케일(벨트 200배 팽창)에서도 별도 보정 없이 맞는다.
+    float astScale = length(vec3(fullModel[0]));
+    float ratio = astScale / dist; // 대략 화면 높이의 몇 배를 차지하는지에 비례
+
+    // LOD 1, 2 모두 원본을 단순화한 '바위 모양' 메시라 어디로 넘어가도 실루엣이 튀지 않는다.
+    // 계측 결과 LOD 1(약 1000삼각형)이 전체 삼각형의 96%를 먹고 있었는데, 그 대부분이
+    // 화면에서 3~10픽셀짜리였다. 그 구간은 훨씬 거친 LOD 2로 충분하다.
+    int lod = 2;                        // 거친 바위(약 200삼각형) — 대부분의 거리
+    if (ratio > 0.010) lod = 0;         // 실제 모델(약 4000삼각형) — 아주 가까울 때
+    else if (ratio > 0.0045) lod = 1;   // 중간 단순화(약 1000삼각형)
+
+    // 3. 시야 밖이면 목록에서 제외한다. 원본 메시가 단위 구를 넘을 수 있고 회전도 하므로
+    //    반지름을 3배로 넉넉히 잡아, 화면 가장자리에서 깜빡이며 사라지는 일이 없게 한다.
+    if (valid && !insideFrustum(renderPos, astScale * 3.0)) valid = false;
+
+    // 4. 12개의 바구니 중 어디로 들어갈지 번호 계산 (0 ~ 11)
     int type = ast.type;
-    int bucketIndex = lod * 4 + type;
+    int bucketIndex = valid ? (lod * 4 + type) : 0;
 
-    // 4. ★ 핵심기술: Atomic 연산으로 충돌 없이 안전하게 내 자리 번호표를 뽑습니다.
-    uint insertPos = atomicAdd(draws[bucketIndex].instanceCount, 1);
+    // 5. 먼저 워크그룹 안에서 자리를 잡는다(공유 메모리라 전역 atomic보다 훨씬 싸다).
+    uint localOffset = 0;
+    if (valid) localOffset = atomicAdd(sBucketCount[bucketIndex], 1);
+    barrier();
 
-    // 5. 발급받은 번호표 위치에 계산이 끝난 3D 행렬 데이터를 쏙 집어넣습니다!
-    uint outputOffset = draws[bucketIndex].firstInstance + insertPos;
-    outMatrices[outputOffset] = finalTransform;
+    // 6. 워크그룹 대표 12개 스레드만 전역 카운터를 건드려 구간을 통째로 예약한다.
+    if (lid < 12) {
+        sBucketBase[lid] = (sBucketCount[lid] > 0)
+            ? atomicAdd(draws[lid].instanceCount, sBucketCount[lid])
+            : 0;
+    }
+    barrier();
+
+    // 7. 예약받은 구간 안의 내 자리에 행렬을 써넣는다.
+    if (valid) {
+        uint outputOffset = draws[bucketIndex].firstInstance + sBucketBase[bucketIndex] + localOffset;
+        outMatrices[outputOffset] = finalTransform;
+    }
 }

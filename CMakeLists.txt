@@ -65,4 +65,9 @@ target_include_directories(VulkanApp PRIVATE
     ${IMGUI_DIR}            # imgui.h 를 찾기 위해 추가
     ${IMGUI_DIR}/backends   # imgui_impl_glfw.h 등을 찾기 위해 추가
 )
+# Vulkan의 깊이 범위는 [0,1]인데 GLM은 기본이 OpenGL의 [-1,1]이다.
+# 헤더에서 #define하면 다른 헤더가 먼저 glm을 포함해버려 늦을 수 있으므로 컴파일 정의로 준다.
+# (이게 빠지면 glm::ortho가 만든 깊이의 음수 절반이 Vulkan에서 잘려나가, 셰도우 맵이 통째로 빈다)
+target_compile_definitions(VulkanApp PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
 target_link_libraries(VulkanApp PRIVATE glfw glm Vulkan::Vulkan)

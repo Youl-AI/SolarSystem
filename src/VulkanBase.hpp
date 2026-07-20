@@ -86,13 +86,23 @@ protected:
         return VK_PRESENT_MODE_FIFO_KHR;
     }
     VkCommandPool commandPool;
-    VkCommandBuffer commandBuffer;
+    // 현재 1. 2로 올리면 CPU 기록과 GPU 실행이 겹쳐 약 1.3ms를 벌 수 있지만, 깊이/오프스크린
+    // 이미지와 유니폼·간접 버퍼가 프레임 간 공유라 경합이 생긴다(동기화 검증으로 확인).
+    // 올리려면 그 리소스들을 프레임별로 복제해야 한다.
+    static const int FRAMES_IN_FLIGHT = 1;
+    VkCommandBuffer commandBuffers[FRAMES_IN_FLIGHT];
+    uint32_t currentFrame = 0;
     VkImage depthImage;
     VkDeviceMemory depthImageMemory;
     VkImageView depthImageView;
-    VkSemaphore imageAvailableSemaphore;
-    VkSemaphore renderFinishedSemaphore;
-    VkFence inFlightFence;
+    // acquire용 세마포어도 in-flight 프레임마다 하나씩 필요하다(직전 프레임의 acquire가
+    // 아직 대기 중일 수 있으므로 돌려쓰면 안 된다).
+    VkSemaphore imageAvailableSemaphores[FRAMES_IN_FLIGHT];
+    // present는 이 세마포어를 해당 이미지가 다시 acquire될 때까지 붙들고 있다. 하나를 돌려쓰면
+    // 아직 present 중인 세마포어를 다시 signal하게 되어(VUID-vkQueueSubmit-pSignalSemaphores-00067)
+    // 드라이버에 따라 화면 깨짐이나 정지로 이어진다. 스왑체인 이미지마다 하나씩 둔다.
+    std::vector<VkSemaphore> renderFinishedSemaphores;
+    VkFence inFlightFences[FRAMES_IN_FLIGHT];
 
     const uint32_t WIDTH = 1024;
     const uint32_t HEIGHT = 768;
@@ -173,26 +183,27 @@ protected:
     virtual void throttleFrame(double /*frameStart*/) {}
     void drawFrame()
     {
-        vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-        vkResetFences(device, 1, &inFlightFence);
+        VkCommandBuffer cb = commandBuffers[currentFrame];
+        vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1, &inFlightFences[currentFrame]);
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
         updateUniformBuffer();
-        vkResetCommandBuffer(commandBuffer, 0);
-        recordCommandBuffer(commandBuffer, imageIndex);
+        vkResetCommandBuffer(cb, 0);
+        recordCommandBuffer(cb, imageIndex);
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        VkSemaphore waitSemaphores[] = {imageAvailableSemaphore};
+        VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
         VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
         submitInfo.waitSemaphoreCount = 1;
         submitInfo.pWaitSemaphores = waitSemaphores;
         submitInfo.pWaitDstStageMask = waitStages;
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
-        VkSemaphore signalSemaphores[] = {renderFinishedSemaphore};
+        submitInfo.pCommandBuffers = &cb;
+        VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[imageIndex]};
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
-        vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence);
+        vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]);
         VkPresentInfoKHR presentInfo{};
         presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         presentInfo.waitSemaphoreCount = 1;
@@ -202,6 +213,7 @@ protected:
         presentInfo.pSwapchains = swapChains;
         presentInfo.pImageIndices = &imageIndex;
         vkQueuePresentKHR(graphicsQueue, &presentInfo);
+        currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT;
     }
 
     // [유틸리티] 파일 입출력 및 버퍼/메모리 관리 공통 함수
@@ -253,7 +265,7 @@ protected:
         vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory);
         vkBindBufferMemory(device, buffer, bufferMemory, 0);
     }
-    VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D, uint32_t layerCount = 1)
+    VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D, uint32_t layerCount = 1, uint32_t mipLevels = 1)
     {
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -262,7 +274,7 @@ protected:
         viewInfo.format = format;
         viewInfo.subresourceRange.aspectMask = aspectFlags;
         viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.levelCount = mipLevels;
         viewInfo.subresourceRange.baseArrayLayer = 0;
         viewInfo.subresourceRange.layerCount = layerCount;
         VkImageView imageView;
@@ -295,7 +307,7 @@ protected:
         vkQueueWaitIdle(graphicsQueue);
         vkFreeCommandBuffers(device, commandPool, 1, &cb);
     }
-    void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t layerCount = 1)
+    void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t layerCount = 1, uint32_t levelCount = 1)
     {
         VkCommandBuffer cb = beginSingleTimeCommands();
         VkImageMemoryBarrier barrier{};
@@ -307,7 +319,7 @@ protected:
         barrier.image = image;
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.baseMipLevel = 0;
-        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.levelCount = levelCount;
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount = layerCount;
         VkPipelineStageFlags sourceStage;
@@ -339,7 +351,81 @@ protected:
         vkCmdCopyBufferToImage(cb, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         endSingleTimeCommands(cb);
     }
-    void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage &image, VkDeviceMemory &imageMemory)
+    // 이 포맷을 선형 필터로 blit할 수 있는지(=GPU 밉맵 생성이 가능한지) 확인한다.
+    bool supportsLinearBlit(VkFormat format)
+    {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
+        return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    }
+
+    // 레벨 0만 채워진 이미지를 받아 blit 체인으로 나머지 밉 레벨을 만든다.
+    // 진입 조건: 전 레벨이 TRANSFER_DST_OPTIMAL. 종료 시: 전 레벨이 SHADER_READ_ONLY_OPTIMAL.
+    void generateMipmaps(VkImage image, int32_t texWidth, int32_t texHeight, uint32_t mipLevels)
+    {
+        VkCommandBuffer cb = beginSingleTimeCommands();
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.image = image;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.subresourceRange.levelCount = 1;
+
+        int32_t mipWidth = texWidth, mipHeight = texHeight;
+        for (uint32_t i = 1; i < mipLevels; ++i)
+        {
+            // 직전 레벨(i-1)을 blit 소스로 전환하고, 그 레벨의 쓰기가 끝나기를 기다린다.
+            barrier.subresourceRange.baseMipLevel = i - 1;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            int32_t nextWidth = mipWidth > 1 ? mipWidth / 2 : 1;
+            int32_t nextHeight = mipHeight > 1 ? mipHeight / 2 : 1;
+
+            VkImageBlit blit{};
+            blit.srcOffsets[0] = {0, 0, 0};
+            blit.srcOffsets[1] = {mipWidth, mipHeight, 1};
+            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.srcSubresource.mipLevel = i - 1;
+            blit.srcSubresource.baseArrayLayer = 0;
+            blit.srcSubresource.layerCount = 1;
+            blit.dstOffsets[0] = {0, 0, 0};
+            blit.dstOffsets[1] = {nextWidth, nextHeight, 1};
+            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.dstSubresource.mipLevel = i;
+            blit.dstSubresource.baseArrayLayer = 0;
+            blit.dstSubresource.layerCount = 1;
+            vkCmdBlitImage(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+            // 소스로 다 쓴 레벨은 최종 레이아웃으로 넘긴다.
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            mipWidth = nextWidth;
+            mipHeight = nextHeight;
+        }
+
+        // 마지막 레벨은 blit 소스가 된 적이 없어 아직 TRANSFER_DST 상태다.
+        barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        endSingleTimeCommands(cb);
+    }
+
+    void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage &image, VkDeviceMemory &imageMemory, uint32_t mipLevels = 1)
     {
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -347,7 +433,7 @@ protected:
         imageInfo.extent.width = width;
         imageInfo.extent.height = height;
         imageInfo.extent.depth = 1;
-        imageInfo.mipLevels = 1;
+        imageInfo.mipLevels = mipLevels;
         imageInfo.arrayLayers = 1;
         imageInfo.format = format;
         imageInfo.tiling = tiling;
@@ -476,7 +562,23 @@ protected:
         subpass.pColorAttachments = &colorAttachmentRef;
         subpass.pDepthStencilAttachment = &depthAttachmentRef;
         std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
+        // acquire 세마포어는 COLOR_ATTACHMENT_OUTPUT에서 대기하는데, 렌더패스의 암묵적
+        // 레이아웃 전환은 그보다 앞서 일어날 수 있다. 의존성이 없으면 아직 화면에 표시 중인
+        // 이미지를 전환해버릴 수 있다(SYNC-HAZARD-WRITE-AFTER-READ).
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        // 깊이 이미지는 스왑체인 이미지 수와 무관하게 하나뿐이라, 프레임이 겹쳐 돌면
+        // 다음 프레임의 깊이 클리어가 이전 프레임의 깊이 쓰기를 덮칠 수 있다(WRITE_AFTER_WRITE).
+        // 이전 프레임의 쓰기를 srcAccessMask에 명시해 메모리 의존성을 만든다.
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
         VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
         renderPassInfo.pAttachments = attachments.data();
@@ -521,8 +623,8 @@ protected:
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandPool = commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = 1;
-        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+        allocInfo.commandBufferCount = FRAMES_IN_FLIGHT;
+        vkAllocateCommandBuffers(device, &allocInfo, commandBuffers);
     }
     void createSyncObjects()
     {
@@ -531,9 +633,24 @@ protected:
         VkFenceCreateInfo fenceInfo{};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-        vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore);
-        vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore);
-        vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence);
+        for (int i = 0; i < FRAMES_IN_FLIGHT; ++i) {
+            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]);
+            vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]);
+        }
+        createRenderFinishedSemaphores();
+    }
+
+    // 스왑체인 이미지 수에 맞춰 present용 세마포어를 다시 만든다.
+    // 스왑체인을 재생성하면 이미지 수가 달라질 수 있으므로 그때마다 호출해야 한다.
+    void createRenderFinishedSemaphores()
+    {
+        for (auto s : renderFinishedSemaphores)
+            vkDestroySemaphore(device, s, nullptr);
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        renderFinishedSemaphores.resize(swapChainImages.size());
+        for (auto &s : renderFinishedSemaphores)
+            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &s);
     }
     void cleanupSwapChain()
     {
@@ -551,9 +668,13 @@ protected:
 
     void cleanupCore()
     {
-        vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
-        vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
-        vkDestroyFence(device, inFlightFence, nullptr);
+        for (auto s : renderFinishedSemaphores)
+            vkDestroySemaphore(device, s, nullptr);
+        renderFinishedSemaphores.clear();
+        for (int i = 0; i < FRAMES_IN_FLIGHT; ++i) {
+            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+            vkDestroyFence(device, inFlightFences[i], nullptr);
+        }
         vkDestroyCommandPool(device, commandPool, nullptr);
         cleanupSwapChain();
         vkDestroyRenderPass(device, renderPass, nullptr);

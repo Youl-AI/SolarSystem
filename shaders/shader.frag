@@ -49,6 +49,60 @@ void writeOut(vec4 color) {
     }
 }
 
+// 셰도우 맵 가림 정도(0 = 완전히 밝음, 1 = 완전히 가려짐).
+// 이 엔진은 GLM_FORCE_DEPTH_ZERO_TO_ONE을 쓰므로 깊이가 Vulkan 규약([0,1])이다.
+// xy만 [-1,1] -> [0,1]로 옮기고 z는 그대로 써야 한다. z까지 0.5*z+0.5로 옮기면
+// 깊이가 항상 과대평가되어 거의 모든 픽셀이 그늘로 판정된다(예전 소행성 코드의 버그).
+float ShadowMapOcclusion(vec4 fragPosLightSpace, vec3 N, vec3 L) {
+    vec3 proj = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    if (proj.z < 0.0 || proj.z > 1.0) return 0.0;
+
+    vec2 uv = proj.xy * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 0.0;
+
+    // 빛이 비스듬할수록 깊이 기울기가 커져 여드름(acne)이 생기므로 바이어스를 키운다.
+    float bias = max(0.0004 * (1.0 - dot(N, L)), 0.00005);
+
+    // 3x3 PCF로 계단현상을 부드럽게. 조기 반환이 있는 비균일 흐름이라 LOD를 명시한다.
+    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+    float occ = 0.0;
+    for (int x = -1; x <= 1; ++x)
+        for (int y = -1; y <= 1; ++y)
+            occ += (proj.z - bias > textureLod(shadowMap, uv + vec2(x, y) * texel, 0.0).r) ? 1.0 : 0.0;
+    return occ / 9.0;
+}
+
+// 고리가 행성 본체에 드리우는 그림자.
+// 픽셀에서 태양으로 광선을 쏘아 고리 평면(행성 적도면)과 만나는 지점을 구하고,
+// 그 반지름이 고리 범위 안이면 고리 텍스처의 알파만큼 빛을 가린다.
+// 고리 텍스처는 texClouds 슬롯으로 들어온다(가스 행성은 구름 맵을 쓰지 않는다).
+// 토성이 아닌 행성은 이 슬롯이 알파 0인 더미라 그림자가 생기지 않는다.
+float RingShadow(vec3 pixelPos, vec3 sunPos, mat4 model, float ringInner, float ringOuter) {
+    vec3 center = vec3(model[3]);
+    // 모델 행렬의 Y축 = 행성의 자전축(자전 기울기 포함). 고리는 이 축에 수직인 평면에 있다.
+    vec3 planeN = normalize(vec3(model[1]));
+    float planetScale = length(vec3(model[0]));
+
+    vec3 L = normalize(sunPos - pixelPos);
+    float denom = dot(L, planeN);
+    if (abs(denom) < 1e-5) return 1.0;              // 광선이 고리면과 평행
+
+    float t = dot(center - pixelPos, planeN) / denom;
+    if (t <= 0.0) return 1.0;                        // 고리면이 태양 반대쪽에 있다
+
+    vec3 hit = pixelPos + L * t;
+    float r = length(hit - center) / planetScale;    // 모델 단위로 환산
+    if (r < ringInner || r > ringOuter) return 1.0;
+
+    float u = (r - ringInner) / (ringOuter - ringInner);
+    // 이 함수는 조기 반환이 있어 비균일 제어 흐름이다. 암묵적 미분(밉 선택)은 여기서
+    // 정의되지 않으므로 LOD를 명시적으로 0으로 고정한다.
+    // 밉맵 0단계는 2048px이라 방사 줄무늬가 표면에 페인트처럼 도드라진다. 그림자는 원래
+    // 반영본影이라 윤곽만 남는 게 자연스러우므로, 낮은 밉을 읽어 미세 줄무늬를 뭉갠다.
+    float density = textureLod(texClouds, vec2(u, 0.5), 4.0).a;
+    return 1.0 - density * 0.45;                     // 고리는 반투명이라 절반 이하만 가린다
+}
+
 float ProjectShadow(vec3 pixelPos, vec3 sunPos, vec3 occluderPos, float occluderRadius) {
     vec3 lightBeamDir = normalize(occluderPos - sunPos);
     vec3 pixelFromOccluder = pixelPos - occluderPos;
@@ -113,7 +167,8 @@ void main() {
     // ---------------------------------------------------------
     else if (fragObjectType == 7) { 
         vec3 sunCenter = vec3(push.model[3]);
-        float actualSunRadius = length(vec3(push.model[0])) / 2.5; 
+        // 2.5는 main.cpp의 haloModel 배율과 반드시 같아야 한다(둘 중 하나만 바꾸면 태양이 깨진다).
+        float actualSunRadius = length(vec3(push.model[0])) / 2.5;
         float domeRadius = actualSunRadius * 2.5; 
         
         vec3 rayDir = normalize(fragPos - ubo.cameraPos);
@@ -137,8 +192,17 @@ void main() {
         float distToRay = length(cross(rayDir, oc)); 
         float r = distToRay / actualSunRadius; 
         
-        if (r < 0.95) discard; 
-        
+        if (r < 0.95) discard;
+
+        // 바깥쪽 조기 탈출. 홍염은 flames = smoothstep(flameRadius, 0.98, r)로 만들어지는데
+        // flameRadius는 아무리 커도 1.01 + 3.15*0.15 ≈ 1.48을 넘지 못한다(fbm 합의 상한).
+        // 즉 r이 그보다 크면 alpha가 정확히 0이라 어차피 아래에서 discard되는 픽셀인데,
+        // 그 전에 fbm을 6번(노이즈 24회) 계산하고 있었다. 돔 반지름이 2.5라 이 바깥 껍질이
+        // 돔 면적의 절반을 넘는다. 여유를 둬 1.6으로 자른다 — 화면상 변화는 없다.
+        // (이 한 줄이 태양 패스를 4.3ms -> 2.0ms로 줄였다. 돔 메시 자체를 줄이는 건
+        //  여기서 이미 싸게 버려지므로 추가 이득이 없었다 — 측정으로 확인.)
+        if (r > 1.6) discard;
+
         // 🚀 [핵심 2: 완벽한 곡면 Z-Depth 변조]
         // 카메라를 돌려도 깊이가 깨지지 않도록, 픽셀마다 구체 표면까지의 거리를 계산합니다.
         float trueDepth = t; // 기본적으로 가장 가까운 평면 거리 사용
@@ -219,6 +283,16 @@ void main() {
         float NdotV = max(dot(baseNormal, viewDir), 0.001);
 
         float shadow = ProjectShadow(fragPos, ubo.sunPos, ubo.moonPos, ubo.moonRadius);
+
+        // 가스 행성은 고리 그림자를 함께 받는다(고리 반지름은 generateRing(1.2, 2.2)와 일치).
+        // 토성 외에는 texClouds가 알파 0 더미라 자동으로 1.0이 반환된다.
+        if (fragObjectType == 9) {
+            shadow *= RingShadow(fragPos, ubo.sunPos, push.model, 1.2, 2.2);
+        }
+
+        // 위성이 본체에 드리우는 그림자(예: 목성 위의 이오 그림자). 해석적 ProjectShadow는
+        // 지구의 달 하나만 다루므로, 나머지는 셰도우 맵이 담당한다.
+        shadow *= 1.0 - ShadowMapOcclusion(fragPosLightSpace, preciseNormal, lightDir) * 0.9;
         
         // =========================================================
         // 🚀 1. 지표면 노을 틴팅 (Terrain Sunset Tint)
@@ -264,6 +338,8 @@ void main() {
         // normal 맵이 없는 천체는 더미 평면 법선(0,0,1)이 바인딩되어 있어 기존 외형이 그대로 유지된다.
         vec3 preciseNormal = calculateNormal(fragTexCoord, baseNormal);
         float shadow = ProjectShadow(fragPos, ubo.sunPos, ubo.earthPos, ubo.earthRadius);
+        // 모행성이나 다른 위성에 가려지는 경우(예: 목성 그림자로 들어가는 이오)를 셰도우 맵이 잡는다.
+        shadow *= 1.0 - ShadowMapOcclusion(fragPosLightSpace, preciseNormal, lightDir) * 0.9;
         float diff = max(dot(preciseNormal, lightDir), 0.0) * shadow;
         writeOut(vec4(texture(texDiffuse, fragTexCoord).rgb * diff, 1.0));
         return;
@@ -333,16 +409,10 @@ void main() {
         vec3 lightDir = normalize(ubo.sunPos - fragPos);
         float diff = max(dot(sharpNormal, lightDir), 0.05); 
         
-        float shadow = 0.0;
-        vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-        if(projCoords.z > -1.0 && projCoords.z < 1.0) {
-            projCoords = projCoords * 0.5 + 0.5;
-            float closestDepth = texture(shadowMap, projCoords.xy).r; 
-            float currentDepth = projCoords.z;
-            float bias = max(0.005 * (1.0 - dot(sharpNormal, lightDir)), 0.001);
-            shadow = currentDepth - bias > closestDepth ? 1.0 : 0.0;
-        }
-        
+        // 예전에는 여기서 z까지 0.5*z+0.5로 옮겨 깊이를 과대평가하는 바람에 소행성이
+        // 사실상 상시 그늘(밝기 20%)로 그려지고 있었다. 공용 함수가 Vulkan 규약대로 처리한다.
+        float shadow = ShadowMapOcclusion(fragPosLightSpace, sharpNormal, lightDir);
+
         vec3 finalColor = albedo * diff * (1.0 - shadow * 0.8);
         finalColor = pow(finalColor, vec3(0.85)); 
         

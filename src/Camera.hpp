@@ -1,6 +1,8 @@
 #pragma once
 #define GLM_FORCE_RADIANS
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+// GLM_FORCE_DEPTH_ZERO_TO_ONE은 CMakeLists의 컴파일 정의로 옮겼다.
+// 여기서 정의하면 main.cpp가 1행에서 VulkanBase.hpp(내부에서 glm 포함)를 먼저 읽는 탓에
+// 한 발 늦어, GLM이 OpenGL 깊이 규약([-1,1])으로 동작해버린다(셰도우 맵이 통째로 비었던 원인).
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
