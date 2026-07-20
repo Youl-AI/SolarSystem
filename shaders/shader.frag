@@ -5,7 +5,6 @@ layout(location = 2) in vec3 fragNormal;
 layout(location = 3) in vec3 fragPos;
 layout(location = 4) flat in int fragObjectType;
 layout(location = 5) in vec3 fragTexCube;
-layout(location = 6) in vec4 fragPosLightSpace; 
 
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view; mat4 proj; vec3 cameraPos; float time;
@@ -13,7 +12,6 @@ layout(binding = 0) uniform UniformBufferObject {
     vec4 occluders[16];       // xyz = 중심(카메라 상대), w = 반지름. MAX_OCCLUDERS와 반드시 일치.
     vec4 occluderParams[16];  // x = 이 천체의 그림자에 쓸 태양 반지름(렌더되는 크기와 다르다)
     int occluderCount;
-    mat4 lightSpaceMatrix;
 } ubo;
 
 layout(binding = 1) uniform sampler2D texDiffuse;
@@ -22,9 +20,6 @@ layout(binding = 3) uniform sampler2D texSpecular;
 layout(binding = 4) uniform sampler2D texNormalDisp;
 layout(binding = 5) uniform sampler2D texClouds;
 layout(binding = 6) uniform samplerCube skyboxTex;
-// sampler2DShadow: 샘플러에 compareEnable이 켜져 있어, 읽으면 깊이가 아니라 '비교 결과'가 나온다.
-// 하드웨어가 비교 후 2x2 보간을 해주므로 탭 하나만으로도 경계가 부드럽다.
-layout(binding = 7) uniform sampler2DShadow shadowMap;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outBrightColor; 
@@ -52,33 +47,6 @@ void writeOut(vec4 color) {
     } else {
         outBrightColor = vec4(0.0, 0.0, 0.0, 1.0);
     }
-}
-
-// 셰도우 맵 가림 정도(0 = 완전히 밝음, 1 = 완전히 가려짐).
-// 이 엔진은 GLM_FORCE_DEPTH_ZERO_TO_ONE을 쓰므로 깊이가 Vulkan 규약([0,1])이다.
-// xy만 [-1,1] -> [0,1]로 옮기고 z는 그대로 써야 한다. z까지 0.5*z+0.5로 옮기면
-// 깊이가 항상 과대평가되어 거의 모든 픽셀이 그늘로 판정된다(예전 소행성 코드의 버그).
-float ShadowMapOcclusion(vec4 fragPosLightSpace, vec3 N, vec3 L) {
-    vec3 proj = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    if (proj.z < 0.0 || proj.z > 1.0) return 0.0;
-
-    vec2 uv = proj.xy * 0.5 + 0.5;
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 0.0;
-
-    // 빛이 비스듬할수록 깊이 기울기가 커져 여드름(acne)이 생기므로 바이어스를 키운다.
-    float bias = max(0.0004 * (1.0 - dot(N, L)), 0.00005);
-
-    // 3x3 탭 PCF. 탭마다 하드웨어가 2x2 비교 보간을 해주므로 실질 4x4 커널이 된다.
-    // 조기 반환이 있는 비균일 흐름이라 암시적 미분을 못 쓰고 LOD를 명시한다.
-    // 탭 간격을 1.5텍셀로 벌려 4096에서도 반그림자 폭이 눈에 보이게 유지한다.
-    // (실제로 이오의 그림자는 태양이 점광원이 아니라 가장자리가 수백 km에 걸쳐 흐리다)
-    vec2 texel = 1.5 / vec2(textureSize(shadowMap, 0));
-    float ref = proj.z - bias;
-    float occ = 0.0;
-    for (int x = -1; x <= 1; ++x)
-        for (int y = -1; y <= 1; ++y)
-            occ += textureLod(shadowMap, vec3(uv + vec2(x, y) * texel, ref), 0.0);
-    return occ / 9.0;
 }
 
 // 고리가 행성 본체에 드리우는 그림자.

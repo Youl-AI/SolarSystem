@@ -92,7 +92,6 @@ struct UniformBufferObject {
     // x = 이 천체의 그림자를 계산할 때 쓸 태양 반지름. 렌더되는 태양과 일부러 다르게 둔다.
     alignas(16) glm::vec4 occluderParams[MAX_OCCLUDERS];
     int occluderCount;
-    alignas(16) glm::mat4 lightSpaceMatrix;
 };
 
 struct GraphicsSettings {
@@ -330,18 +329,6 @@ private:
     VkPipeline postPipeline;
     VkDescriptorSet postDescriptorSet;
 
-    // 셰도우 맵 한 변의 길이. 이 한 장이 행성계 전체(가장 바깥 위성 궤도까지)를 덮어야 하므로
-    // 정작 본체에 돌아가는 텍셀은 얼마 안 된다. 목성계는 칼리스토 궤도(5.4)가 기준이라
-    // 2048일 때 목성 본체가 270텍셀뿐이었고, 그림자 경계가 사각형으로 보였다.
-    static constexpr uint32_t SHADOW_DIM = 4096;
-    VkImage shadowImage;
-    VkDeviceMemory shadowMemory;
-    VkImageView shadowView;
-    VkSampler shadowSampler;
-    VkRenderPass shadowRenderPass;
-    VkFramebuffer shadowFramebuffer;
-    VkPipeline shadowPipeline;
-    VkPipelineLayout shadowPipelineLayout;
 
     enum class AppState { LOBBY, SIMULATION };
     AppState currentAppState = AppState::LOBBY;
@@ -693,9 +680,9 @@ protected:
     bool profiling = false;
     int tsFrameCount = 0;
     double tsAccumCpuRecord = 0.0, tsAccumCpuFrame = 0.0, tsLastFrameStart = 0.0;
-    double tsAccumGpu[11] = {};
+    double tsAccumGpu[10] = {};
     VkDrawIndexedIndirectCommand lastDrawCmds[12] = {}; // 직전 프레임의 LOD 바구니 스냅샷
-    static const int TS_SLOTS = 12; // 0시작 1컴퓨트 2섀도우 3소행성 4행성 5은하 6궤도선 7태양 8블러 9포스트 10끝
+    static const int TS_SLOTS = 11; // 0시작 1컴퓨트 2소행성 3행성 4은하 5궤도선 6태양 7블러 8포스트 9끝
 
     void initProfiling() {
         const char* env = std::getenv("SOLAR_PROFILE");
@@ -720,12 +707,12 @@ protected:
 
         if (tsFrameCount % 120 == 0) {
             double n = 120.0;
-            const char* names[11] = {"compute","shadow","ASTEROID","BODIES","SKYBOX","GALAXY","orbits","SUN","blur","post","tail"};
+            const char* names[10] = {"compute","ASTEROID","BODIES","SKYBOX","GALAXY","orbits","SUN","blur","post","tail"};
             std::cout << "[profile] frames=" << tsFrameCount
                       << "  cpuFrame=" << (tsAccumCpuFrame / n) << "ms"
                       << "  cpuRecord=" << (tsAccumCpuRecord / n) << "ms  | GPU: ";
             double gpuTotal = 0;
-            for (int i = 0; i < 11; ++i) { std::cout << names[i] << "=" << (tsAccumGpu[i] / n) << " "; gpuTotal += tsAccumGpu[i] / n; }
+            for (int i = 0; i < 10; ++i) { std::cout << names[i] << "=" << (tsAccumGpu[i] / n) << " "; gpuTotal += tsAccumGpu[i] / n; }
             std::cout << " gpuTotal=" << gpuTotal << "ms\n";
 
             // 실제로 어느 LOD에 몇 개가 들어갔는지(updateUniformBuffer에서 떠 둔 스냅샷).
@@ -744,7 +731,7 @@ protected:
                           << " 합계=" << (tris[0] + tris[1] + tris[2]) << "\n";
             }
             std::cout << std::flush;
-            for (int i = 0; i < 11; ++i) tsAccumGpu[i] = 0.0;
+            for (int i = 0; i < 10; ++i) tsAccumGpu[i] = 0.0;
             tsAccumCpuRecord = tsAccumCpuFrame = 0.0;
         }
     }
@@ -814,7 +801,6 @@ protected:
         createTextureSampler();
         createColorTexture(0, 0, 0, 0, texDummyBlack, memDummyBlack, viewDummyBlack, VK_FORMAT_R8G8B8A8_UNORM);
         createColorTexture(128, 128, 255, 255, texDummyFlatNormal, memDummyFlatNormal, viewDummyFlatNormal, VK_FORMAT_R8G8B8A8_UNORM);
-        createShadowResources();
 
         // 4. 2만 개의 소행성 데이터 수학적 생성 (다중 모델 부여 포함) 및 SSBO 업로드
         asteroidTransforms = generateAsteroidBelt(10000, 9.0f, 12.0f, 0.4f, 0.008f, 0.025f); // 소행성대
@@ -832,7 +818,6 @@ protected:
         createBlurResources();
         createBlurPipeline();
         createPostProcessPipeline();
-        createShadowPipeline();
 
         // =========================================================
         // 🚀 [태양계 전면 재설계] 영역(Domain) 침범 방지 및 연쇄 확장 시스템
@@ -1220,108 +1205,7 @@ protected:
             gearTexId = ImGui_ImplVulkan_AddTexture(textureSampler, gearView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
-    void createShadowResources() {
-        VkFormat depthFormat = findDepthFormat(); 
-        VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        iInfo.imageType = VK_IMAGE_TYPE_2D; iInfo.extent.width = SHADOW_DIM; iInfo.extent.height = SHADOW_DIM;
-        iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1;
-        iInfo.format = depthFormat; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        iInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        vkCreateImage(device, &iInfo, nullptr, &shadowImage);
-        
-        VkMemoryRequirements memReqs; vkGetImageMemoryRequirements(device, shadowImage, &memReqs);
-        VkMemoryAllocateInfo allocInfo{}; allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memReqs.size; allocInfo.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        vkAllocateMemory(device, &allocInfo, nullptr, &shadowMemory);
-        vkBindImageMemory(device, shadowImage, shadowMemory, 0);
-        
-        VkImageViewCreateInfo vInfo{}; vInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        vInfo.image = shadowImage; vInfo.viewType = VK_IMAGE_VIEW_TYPE_2D; vInfo.format = depthFormat;
-        vInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        vInfo.subresourceRange.baseMipLevel = 0; vInfo.subresourceRange.levelCount = 1;
-        vInfo.subresourceRange.baseArrayLayer = 0; vInfo.subresourceRange.layerCount = 1;
-        vkCreateImageView(device, &vInfo, nullptr, &shadowView);
-        
-        VkSamplerCreateInfo sInfo{}; sInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        sInfo.magFilter = VK_FILTER_LINEAR; sInfo.minFilter = VK_FILTER_LINEAR;
-        sInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; sInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; sInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-        sInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; 
-        // 하드웨어 비교 샘플러. 이게 없으면 깊이 값을 보간한 뒤 셰이더가 직접 비교하게 되어
-        // 탭 하나가 0 아니면 1만 내놓고, 결국 경계가 텍셀 단위 사각형으로 남는다.
-        // compareEnable을 켜면 GPU가 비교를 먼저 하고 그 결과를 2x2 보간하므로 중간값이 나온다.
-        // 셰이더 판정이 "내 깊이 > 저장된 깊이면 가려짐"이라 GREATER를 쓴다.
-        sInfo.compareEnable = VK_TRUE;
-        sInfo.compareOp = VK_COMPARE_OP_GREATER;
-        vkCreateSampler(device, &sInfo, nullptr, &shadowSampler);
-        
-        VkAttachmentDescription attachment{};
-        attachment.format = depthFormat; attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        
-        VkAttachmentReference depthRef{}; depthRef.attachment = 0; depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        
-        VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 0; subpass.pDepthStencilAttachment = &depthRef;
-        
-        std::array<VkSubpassDependency, 2> deps{};
-        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0;
-        deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-        deps[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT; deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        deps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        
-        VkRenderPassCreateInfo rpInfo{}; rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        rpInfo.attachmentCount = 1; rpInfo.pAttachments = &attachment; rpInfo.subpassCount = 1; rpInfo.pSubpasses = &subpass; rpInfo.dependencyCount = 2; rpInfo.pDependencies = deps.data();
-        vkCreateRenderPass(device, &rpInfo, nullptr, &shadowRenderPass);
-        
-        VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fbInfo.renderPass = shadowRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &shadowView;
-        fbInfo.width = SHADOW_DIM; fbInfo.height = SHADOW_DIM; fbInfo.layers = 1;
-        vkCreateFramebuffer(device, &fbInfo, nullptr, &shadowFramebuffer);
-    }
-
-    void createShadowPipeline() {
-        VkPushConstantRange pcRange{}; pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pcRange.offset = 0; pcRange.size = sizeof(PushConstants);
-        VkPipelineLayoutCreateInfo layInfo{}; layInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; layInfo.setLayoutCount = 1; layInfo.pSetLayouts = &descriptorSetLayout; layInfo.pushConstantRangeCount = 1; layInfo.pPushConstantRanges = &pcRange;
-        vkCreatePipelineLayout(device, &layInfo, nullptr, &shadowPipelineLayout);
-        
-        auto vertCode = readFile("shaders/shadow_vert.spv");
-        VkShaderModule vertMod = createShaderModule(vertCode);
-        VkPipelineShaderStageCreateInfo vS{}; vS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        vS.stage = VK_SHADER_STAGE_VERTEX_BIT; vS.module = vertMod; vS.pName = "main";
-        
-        auto bindingDescription = Vertex::getBindingDescription();
-        auto attributeDescriptions = Vertex::getAttributeDescriptions();
-        VkPipelineVertexInputStateCreateInfo vI{}; vI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vI.vertexBindingDescriptionCount = 1; vI.pVertexBindingDescriptions = &bindingDescription;
-        vI.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size()); vI.pVertexAttributeDescriptions = attributeDescriptions.data();
-        
-        VkPipelineInputAssemblyStateCreateInfo iA{}; iA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; iA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        
-        VkViewport vp{}; vp.width = (float)SHADOW_DIM; vp.height = (float)SHADOW_DIM; vp.maxDepth = 1.0f;
-        VkRect2D sc{}; sc.extent = {SHADOW_DIM, SHADOW_DIM};
-        VkPipelineViewportStateCreateInfo vpS{}; vpS.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vpS.viewportCount = 1; vpS.pViewports = &vp; vpS.scissorCount = 1; vpS.pScissors = &sc;
-        
-        VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_FRONT_BIT; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
-        rs.depthBiasEnable = VK_TRUE; rs.depthBiasConstantFactor = 1.25f; rs.depthBiasSlopeFactor = 1.75f;
-        
-        VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        
-        VkPipelineDepthStencilStateCreateInfo ds{}; ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        ds.depthTestEnable = VK_TRUE; ds.depthWriteEnable = VK_TRUE; ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-        
-        VkGraphicsPipelineCreateInfo pInfo{}; pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pInfo.stageCount = 1; pInfo.pStages = &vS; pInfo.pVertexInputState = &vI; pInfo.pInputAssemblyState = &iA; pInfo.pViewportState = &vpS; pInfo.pRasterizationState = &rs; pInfo.pMultisampleState = &ms; pInfo.pDepthStencilState = &ds; pInfo.layout = shadowPipelineLayout; pInfo.renderPass = shadowRenderPass;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pInfo, nullptr, &shadowPipeline);
-        vkDestroyShaderModule(device, vertMod, nullptr);
-    }
-
-    // 오프스크린/블러 렌더 크기 = round(renderScale x swapChainExtent). 포스트/UI는 계속 swapChainExtent.
+            // 오프스크린/블러 렌더 크기 = round(renderScale x swapChainExtent). 포스트/UI는 계속 swapChainExtent.
     void computeRenderExtent() {
         uint32_t w = std::max(1u, (uint32_t)std::lround(swapChainExtent.width  * settings.renderScale));
         uint32_t h = std::max(1u, (uint32_t)std::lround(swapChainExtent.height * settings.renderScale));
@@ -1878,20 +1762,10 @@ protected:
             if (planets[i].parentIndex == primary) shadowSystemIndices.push_back(i);
         if (primary == 2) shadowSystemIncludesEarthMoon = true; // 달은 planets 밖에 따로 있다
 
-        // 계 전체를 감싸는 반경(모행성 기준). 위성 궤도가 가장 먼 것에 맞춘다.
-        glm::dvec3 primaryPos = planets[primary].currentPosition;
-        float systemRadius = glm::mix(planets[primary].radius, planets[primary].realRadius, easeScale);
-        for (int i : shadowSystemIndices)
-            systemRadius = std::max(systemRadius, (float)glm::distance(planets[i].currentPosition, primaryPos)
-                                                 + glm::mix(planets[i].radius, planets[i].realRadius, easeScale));
-        if (shadowSystemIncludesEarthMoon)
-            systemRadius = std::max(systemRadius, (float)glm::distance(moon.currentPosition, primaryPos)
-                                                 + glm::mix(moon.radius, moon.realRadius, easeScale));
-
         // ── 해석적 그림자에 넘길 가림 천체들 ─────────────────────────────────
         // 위에서 고른 '계'를 그대로 쓴다. 행성끼리는 실제로 그림자를 드리우지 않으므로
         // 목록에 넣지 않는다(보기 좋으라고 궤도를 압축해 둔 탓에 생기는 가짜 그림자를 막는다).
-        // 반지름은 셰도우 맵 쪽과 같은 mix를 써서 리얼 스케일 전환 중에도 어긋나지 않게 한다.
+        // 반지름은 리얼 스케일 전환 중에도 렌더되는 크기를 그대로 따라가도록 mix를 쓴다.
         ubo.occluderCount = 0;
         auto addOccluder = [&](const glm::dvec3 &pos, float r, float sunShrink) {
             if (ubo.occluderCount >= MAX_OCCLUDERS) return;
@@ -1907,41 +1781,6 @@ protected:
             addOccluder(moon.currentPosition,
                         glm::mix(moon.radius, moon.realRadius, easeScale), moon.shadowSunShrink);
 
-        glm::vec3 shadowFocusPos = relativeToCamera(primaryPos);
-        glm::vec3 sunPosRel = relativeToCamera(sun.currentPosition);
-
-        glm::vec3 lightDir = glm::normalize(shadowFocusPos - sunPosRel);
-        glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
-        if(abs(glm::dot(lightDir, up)) > 0.99f) up = glm::vec3(0.0f, 0.0f, 1.0f);
-        glm::mat4 lightView = glm::lookAt(sunPosRel, shadowFocusPos, up);
-
-        // 상자를 계에 딱 맞춘다(여유 10%). 좁을수록 텍셀이 촘촘해져 위성 그림자가 또렷해진다.
-        float orthoSize = systemRadius * 1.1f;
-
-        // 근/원 평면은 태양-계 거리에 맞춰 잡는다. 예전엔 0.1~200 고정이라 리얼 스케일에서
-        // 궤도가 수천 단위로 늘어나면 계 전체가 원평면 밖으로 나가 그림자가 아예 사라졌다.
-        float sunDist = glm::distance(shadowFocusPos, sunPosRel);
-        float zNear = std::max(0.01f, sunDist - systemRadius * 2.0f);
-        float zFar  = sunDist + systemRadius * 2.0f;
-        glm::mat4 lightProj = glm::ortho(-orthoSize, orthoSize, -orthoSize, orthoSize, zNear, zFar);
-        lightProj[1][1] *= -1;
-        ubo.lightSpaceMatrix = lightProj * lightView;
-
-        // 셰도우 맵 진단: 천체들이 광원 클립 공간 어디에 떨어지는지 확인한다.
-        // xy는 [-1,1], z는 [0,1] 안에 들어와야 셰도우 맵에 기록된다.
-        if (profiling && tsFrameCount % 240 == 0) {
-            auto dump = [&](const char* nm, const glm::dvec3& wp) {
-                glm::vec4 c = ubo.lightSpaceMatrix * glm::vec4(relativeToCamera(wp), 1.0f);
-                glm::vec3 n = glm::vec3(c) / c.w;
-                std::cout << "  [shadow] " << nm << " ndc=(" << n.x << ", " << n.y << ", " << n.z << ")"
-                          << (fabs(n.x) <= 1 && fabs(n.y) <= 1 && n.z >= 0 && n.z <= 1 ? "  OK" : "  <== 범위밖") << "\n";
-            };
-            std::cout << "[shadow] orthoSize=" << orthoSize << " systemRadius=" << systemRadius
-                      << " zNear=" << zNear << " zFar=" << zFar << "\n";
-            for (int i : shadowSystemIndices) dump(planets[i].name.c_str(), planets[i].currentPosition);
-            if (shadowSystemIncludesEarthMoon) dump("Moon", moon.currentPosition);
-            std::cout << std::flush;
-        }
         
         memcpy(uniformBufferMapped, &ubo, sizeof(ubo));
 
@@ -2286,36 +2125,8 @@ protected:
         barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-        tsMark(cb, 1);
-        // 1. 섀도우 맵핑 패스
-        VkRenderPassBeginInfo shadowPassInfo{}; shadowPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        shadowPassInfo.renderPass = shadowRenderPass; shadowPassInfo.framebuffer = shadowFramebuffer;
-        shadowPassInfo.renderArea.offset = {0, 0}; shadowPassInfo.renderArea.extent = {SHADOW_DIM, SHADOW_DIM}; 
-        VkClearValue depthClear; depthClear.depthStencil = {1.0f, 0};
-        shadowPassInfo.clearValueCount = 1; shadowPassInfo.pClearValues = &depthClear;
-
-        vkCmdBeginRenderPass(cb, &shadowPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
-        
         VkBuffer vertexBuffers[] = {vertexBuffer}; VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets); vkCmdBindIndexBuffer(cb, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-        auto drawShadowObject = [&](const Planet &p, glm::mat4 mat) {
-            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout, 0, 1, &p.descriptorSet, 0, nullptr);
-            PushConstants pc{mat, 0};
-            vkCmdPushConstants(cb, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
-            vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0); 
-        };
-        // 현재 보고 있는 '위성계'만 그림자를 주고받는다.
-        // 실제로 행성끼리는 그림자가 닿지 않는다 — 본그림자 길이가 R_행성 x 태양거리 / R_태양라
-        // 목성도 약 0.53 AU에서 끝나는데, 목성-토성 최소 거리는 4.4 AU다. 8배 넘게 모자란다.
-        // 반면 위성 그림자는 흔하다(이오는 목성 표면까지 35만 km, 이오의 본그림자는 204만 km).
-        // 궤도를 압축해 둔 이 시뮬레이션에서는 광원 시점에서 남남인 행성이 우연히 겹쳐
-        // 비현실적인 그림자가 생기므로, 캐스터를 한 계(系)로 제한한다.
-        for (int i : shadowSystemIndices) drawShadowObject(planets[i], planets[i].currentModelMat);
-        if (shadowSystemIncludesEarthMoon) drawShadowObject(moon, moon.currentModelMat);
-
-        vkCmdEndRenderPass(cb);
 
         VkRenderPassBeginInfo offscreenPassInfo{}; offscreenPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         offscreenPassInfo.renderPass = offscreenRenderPass; offscreenPassInfo.framebuffer = offscreenFramebuffer;
@@ -2325,7 +2136,7 @@ protected:
         clearValues[0].color = {{0.01f, 0.01f, 0.01f, 1.0f}}; clearValues[1].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; clearValues[2].depthStencil = {1.0f, 0};
         offscreenPassInfo.clearValueCount = 3; offscreenPassInfo.pClearValues = clearValues.data();
         
-        tsMark(cb, 2);
+        tsMark(cb, 1);
         vkCmdBeginRenderPass(cb, &offscreenPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         setViewport(cb, renderExtent);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
@@ -2344,7 +2155,7 @@ protected:
             }
         }
 
-        tsMark(cb, 3); // 소행성 그리기 끝
+        tsMark(cb, 2); // 소행성 그리기 끝
         auto drawObject = [&](const Planet &p, glm::mat4 mat, int type) {
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &p.descriptorSet, 0, nullptr);
             PushConstants pc{mat, type}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
@@ -2378,10 +2189,10 @@ protected:
             drawObject(moon, moon.currentModelMat, moon.typeId);
         }
         
-        tsMark(cb, 4); // 천체 본체 끝 (다음은 스카이박스)
+        tsMark(cb, 3); // 천체 본체 끝 (다음은 스카이박스)
         drawObject(sun, glm::rotate(glm::mat4(1.0f), currentAppTime * glm::radians(0.5f), glm::vec3(0.0f, 1.0f, 0.0f)), 3);
         
-        tsMark(cb, 5); // 행성/스카이박스 끝
+        tsMark(cb, 4); // 행성/스카이박스 끝
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &milkyWay.descriptorSet, 0, nullptr);
         
         float galaxyDrop = glm::mix(-15.0f, -2000.0f, scaleLerp);
@@ -2413,7 +2224,7 @@ protected:
         // =========================================================
         // 🚀 궤도선 렌더링 구역
         // =========================================================
-        tsMark(cb, 6); // 은하 끝
+        tsMark(cb, 5); // 은하 끝
         if (showOrbits) {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipeline);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sun.descriptorSet, 0, nullptr);
@@ -2464,7 +2275,7 @@ protected:
         // =========================================================
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-        tsMark(cb, 7); // 궤도선 끝
+        tsMark(cb, 6); // 궤도선 끝
         // 3. 거대한 태양 홍염 (Type 7) - 가까우면 숨김
         if (shouldRenderSun) {
             // 🚀 [수정됨] 태양 홍염도 리얼 스케일에 맞춰 거대하게 팽창합니다.
@@ -2483,7 +2294,7 @@ protected:
 
         vkCmdEndRenderPass(cb);
 
-        tsMark(cb, 8);
+        tsMark(cb, 7);
         // ── 밉체인 블룸 ──────────────────────────────────────────────────
         // 한 번의 draw = 전체화면 삼각형 하나. 렌더 타겟과 소스는 같은 이미지의 다른 밉이며,
         // 각 뷰가 한 밉만 덮으므로 레이아웃 전환이 서로 침범하지 않는다.
@@ -2520,7 +2331,7 @@ protected:
         std::array<VkClearValue, 2> swapClear{}; swapClear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; swapClear[1].depthStencil = {1.0f, 0};
         renderPassInfo.clearValueCount = 2; renderPassInfo.pClearValues = swapClear.data();
         
-        tsMark(cb, 9);
+        tsMark(cb, 8);
         vkCmdBeginRenderPass(cb, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         setFullViewport(cb);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipeline);
@@ -2530,8 +2341,8 @@ protected:
         vkCmdDraw(cb, 3, 1, 0, 0);
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cb);
         vkCmdEndRenderPass(cb);
+        tsMark(cb, 9);
         tsMark(cb, 10);
-        tsMark(cb, 11);
         vkEndCommandBuffer(cb);
         tsAccumCpuRecord += (glfwGetTime() - recordStart) * 1000.0;
     }
@@ -2547,10 +2358,6 @@ protected:
         vkDestroyBuffer(device, computeOutputBuffer, nullptr); vkFreeMemory(device, computeOutputMem, nullptr);
         vkDestroyBuffer(device, indirectDrawBuffer, nullptr); vkFreeMemory(device, indirectDrawMem, nullptr);
 
-        vkDestroySampler(device, shadowSampler, nullptr); vkDestroyImageView(device, shadowView, nullptr);
-        vkDestroyImage(device, shadowImage, nullptr); vkFreeMemory(device, shadowMemory, nullptr);
-        vkDestroyPipeline(device, shadowPipeline, nullptr); vkDestroyPipelineLayout(device, shadowPipelineLayout, nullptr);
-        vkDestroyFramebuffer(device, shadowFramebuffer, nullptr); vkDestroyRenderPass(device, shadowRenderPass, nullptr);
 
         vkDestroySampler(device, textureSampler, nullptr);
         for (auto view : allViews) vkDestroyImageView(device, view, nullptr);
@@ -2678,32 +2485,32 @@ private:
         auto mkImgInfo = [&](VkImageView v) { VkDescriptorImageInfo i{}; i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; i.imageView = v; i.sampler = textureSampler; return i; };
         
         VkDescriptorImageInfo iDiff = mkImgInfo(p.viewDiffuse), iNight = mkImgInfo(p.viewNight), iSpec = mkImgInfo(p.viewSpecular), iNorm = mkImgInfo(p.viewNormal), iCloud = mkImgInfo(p.viewClouds), iSky = mkImgInfo(viewSkybox);
-        VkDescriptorImageInfo iShadow{}; iShadow.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; iShadow.imageView = shadowView; iShadow.sampler = shadowSampler;
 
         VkDescriptorBufferInfo ssboInfo{}; ssboInfo.buffer = computeOutputBuffer; ssboInfo.offset = 0; ssboInfo.range = VK_WHOLE_SIZE;
 
-        std::array<VkWriteDescriptorSet, 9> writes{}; 
-        for (int i = 0; i < 9; i++) { writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet = p.descriptorSet; writes[i].dstBinding = i; writes[i].descriptorCount = 1; }
+        std::array<VkWriteDescriptorSet, 8> writes{}; 
+        for (int i = 0; i < 8; i++) { writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet = p.descriptorSet; writes[i].dstBinding = i; writes[i].descriptorCount = 1; }
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; writes[0].pBufferInfo = &bInfo;
-        for (int i = 1; i < 8; i++) writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[1].pImageInfo = &iDiff; writes[2].pImageInfo = &iNight; writes[3].pImageInfo = &iSpec; writes[4].pImageInfo = &iNorm; writes[5].pImageInfo = &iCloud; writes[6].pImageInfo = &iSky; writes[7].pImageInfo = &iShadow;
-        writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[8].pBufferInfo = &ssboInfo;
+        for (int i = 1; i < 7; i++) writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo = &iDiff; writes[2].pImageInfo = &iNight; writes[3].pImageInfo = &iSpec; writes[4].pImageInfo = &iNorm; writes[5].pImageInfo = &iCloud; writes[6].pImageInfo = &iSky;
+        writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[7].pBufferInfo = &ssboInfo;
 
-        vkUpdateDescriptorSets(device, 9, writes.data(), 0, nullptr); return p;
+        vkUpdateDescriptorSets(device, 8, writes.data(), 0, nullptr); return p;
     }
 
     void createDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 9> b{}; // [NEW] 바인딩 슬롯 9개로 확장
-        for (int i = 0; i < 9; i++) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; }
+        std::array<VkDescriptorSetLayoutBinding, 8> b{}; // 0=UBO, 1~6=텍스처, 7=소행성 SSBO
+        for (int i = 0; i < 8; i++) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; }
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; b[0].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
-        for (int i = 1; i < 8; i++) b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        for (int i = 1; i < 7; i++) b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         b[4].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
-        
-        // [NEW] 8번 바인딩: 버텍스 셰이더에서 사용하는 대용량 데이터 버퍼(SSBO)
-        b[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; 
-        b[8].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
-        VkDescriptorSetLayoutCreateInfo layoutInfo{}; layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layoutInfo.bindingCount = 9; layoutInfo.pBindings = b.data();
+        // 7번 바인딩: 버텍스 셰이더가 읽는 소행성 인스턴스 버퍼(SSBO).
+        // 셰도우 맵이 쓰던 자리를 물려받았다.
+        b[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        b[7].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{}; layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layoutInfo.bindingCount = 8; layoutInfo.pBindings = b.data();
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
     }
 
