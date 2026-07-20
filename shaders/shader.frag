@@ -151,7 +151,7 @@ float SunVisibility(vec3 P) { return 1.0 - SunDiscOcclusion(P); }
 
 const vec3  kRayleigh     = vec3(5.8, 13.5, 33.1); // 1/λ^4 비율 (680 / 550 / 440nm)
 const float kAtmoDensity  = 1.4;                    // 전체 광학 두께(눈으로 맞춘 값)
-const float kAtmoBright   = 0.8;                    // 산란광 밝기.
+const float kAtmoBright   = 0.4;                    // 산란광 밝기.
 // 22.0으로 시작했다가 화면이 통째로 흰 공이 됐다. 시선이 대기를 비스듬히 길게 지나는
 // 가장자리에서는 광학 경로가 중심의 18배까지 길어져, 중심을 기준으로 맞추면 림이
 // 15를 넘겨 톤매퍼와 블룸을 동시에 포화시킨다. 림이 1.4 근처에 오도록 잡은 값이다.

@@ -109,6 +109,7 @@ struct GraphicsSettings {
     bool  fullscreen      = false;
     bool  orbitLines      = false;
     bool  realScale       = false;
+    bool  asteroids       = true;   // 끄면 소행성대/카이퍼벨트를 통째로 건너뛴다
 };
 
 static const int kResolutions[][2] = {
@@ -717,7 +718,7 @@ protected:
 
         if (tsFrameCount % 120 == 0) {
             double n = 120.0;
-            const char* names[10] = {"compute","ASTEROID","BODIES","SKYBOX","GALAXY","orbits","SUN","blur","post","tail"};
+            const char* names[10] = {"compute","ASTEROID","BODIES","SKYBOX","GALAXY+ATMO","orbits","SUN","blur","post","tail"};
             std::cout << "[profile] frames=" << tsFrameCount
                       << "  cpuFrame=" << (tsAccumCpuFrame / n) << "ms"
                       << "  cpuRecord=" << (tsAccumCpuRecord / n) << "ms  | GPU: ";
@@ -2074,6 +2075,7 @@ protected:
         bool inSim = (currentAppState == AppState::SIMULATION);
         if (!inSim) ImGui::BeginDisabled();
         ImGui::Checkbox("Orbit Lines", &settings.orbitLines);
+        ImGui::Checkbox("Asteroids", &settings.asteroids);
         ImGui::Checkbox("Real Scale", &settings.realScale);
         if (!inSim) ImGui::EndDisabled();
 
@@ -2160,12 +2162,14 @@ protected:
         PushConstants pcAst{astRot, 8};
         vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pcAst);
 
-        for (int type = 0; type < 4; ++type) {
-            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &asteroidTypes[type].descriptorSet, 0, nullptr);
-            for (int lod = 0; lod < 3; ++lod) {
-                int bucketIndex = lod * 4 + type;
-                VkDeviceSize offset = bucketIndex * sizeof(VkDrawIndexedIndirectCommand);
-                vkCmdDrawIndexedIndirect(cb, indirectDrawBuffer, offset, 1, sizeof(VkDrawIndexedIndirectCommand));
+        if (settings.asteroids) {
+            for (int type = 0; type < 4; ++type) {
+                vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &asteroidTypes[type].descriptorSet, 0, nullptr);
+                for (int lod = 0; lod < 3; ++lod) {
+                    int bucketIndex = lod * 4 + type;
+                    VkDeviceSize offset = bucketIndex * sizeof(VkDrawIndexedIndirectCommand);
+                    vkCmdDrawIndexedIndirect(cb, indirectDrawBuffer, offset, 1, sizeof(VkDrawIndexedIndirectCommand));
+                }
             }
         }
 
@@ -2189,11 +2193,6 @@ protected:
             if (distToPlanet > (planet.radius * 1.2f)) {
                 drawObject(planet, planet.currentModelMat, planet.typeId);
                 if (planet.hasClouds) drawObject(planet, planet.cloudModelMat, 2);
-                if (planet.hasAtmosphere) {
-                    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, atmospherePipeline);
-                    drawObject(planet, planet.atmosphereModelMat, 11);
-                    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-                }
                 if (planet.name == "Saturn") {
                     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &saturnRing.descriptorSet, 0, nullptr);
                     PushConstants ringPush{planet.currentModelMat, 5}; 
@@ -2239,6 +2238,23 @@ protected:
         PushConstants mwPush{mwModel, 10, galaxyAlpha}; 
         vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &mwPush);
         vkCmdDrawIndexed(cb, galaxyIndexCount, 1, galaxyFirstIndex, galaxyVertexOffset, 0);
+
+        // 대기 껍질은 배경이 전부 깔린 뒤에 그려야 한다.
+        //
+        // 껍질은 일부러 깊이를 쓰지 않는다(자기보다 작은 행성 뒤의 것들을 삼키지 않으려고).
+        // 그런데 스카이박스는 천체보다 나중에, 원거리 깊이로, 알파 1로 그려진다. 그래서
+        // 행성 실루엣 바깥의 발광 영역은 깊이가 비어 있는 탓에 스카이박스가 통과해 덮어버렸다.
+        // 껍질을 만든 이유가 바로 그 바깥 발광인데 그게 통째로 지워지고 있었다.
+        //
+        // 유일하게 살아남던 곳이 소행성 위였다. 소행성은 깊이를 쓰므로 스카이박스가 거기서만
+        // 깊이 테스트에 걸렸고, 그 결과 소행성만 빛나는 점으로 남았다.
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, atmospherePipeline);
+        for (const auto &planet : planets) {
+            if (!planet.hasAtmosphere) continue;
+            float d = glm::length(currentCameraPos - glm::vec3(planet.currentPosition));
+            if (d > planet.radius * 1.2f) drawObject(planet, planet.atmosphereModelMat, 11);
+        }
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
         // =========================================================
         // 🚀 궤도선 렌더링 구역
