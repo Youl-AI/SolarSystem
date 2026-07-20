@@ -865,7 +865,9 @@ protected:
         planets.push_back(createPlanet("Neptune", 9, 0.39f, 62.00f, 2.00f, 0.009f, 37.2f, 28.32f, 1.77f, 44.0f, 131.0f, 90.0f, 80.0f, false, "textures/planets/neptune.jpg", "", "", "", ""));  // index 8
         
         // 4. 달 및 토성 고리
-        moon = createPlanet("Moon", 1, 0.08f, 0.75f, 45.0f, 0.054f, 45.0f, 6.68f, 5.14f, 318.0f, 125.0f, 45.0f, 0.0f, false, "textures/moons/8k_moon.jpg", "", "", "textures/moons/moon_normal.jpg", "");
+        // 노말맵을 LOLA 실측 DEM(118m)에서 구운 것으로 교체. 예전 moon_normal.jpg는 알베도에서
+        // 뽑은 가짜라 크레이터 바닥의 어둠을 요철로 착각했다. normalAmp는 아래 realScale 블록에서 설정.
+        moon = createPlanet("Moon", 1, 0.08f, 0.75f, 45.0f, 0.054f, 45.0f, 6.68f, 5.14f, 318.0f, 125.0f, 45.0f, 0.0f, false, "textures/moons/8k_moon.jpg", "", "", "textures/moons/moon_normal.png", "");
         saturnRing = createPlanet("SaturnRing", 5, 1.60f, 0.0f, 0.0f, 0.0f, 0.0f, 26.73f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/planets/8k_saturn_ring_alpha.png", "", "", "", "");
         
         // 5. 카이퍼 벨트 및 왜소행성 (외행성들이 밀려난 만큼, 바깥쪽 영역(75~100)으로 완벽하게 밀려납니다)
@@ -910,6 +912,7 @@ protected:
         sun.realRadius = 54.0f; sun.realOrbit = 0.0f;
         moon.realRadius = 0.13f; moon.realOrbit = 1.5f;
         moon.shadowSunShrink = SHADOW_SUN_SHRINK_MOON;
+        moon.normalAmp = 5.0f / 4.0f;  // LOLA DEM 맵을 4배 증폭해 구웠으므로(다른 실측 맵과 동일)
         for (auto& p : planets) {
             // 실측 DEM에서 구운 normal 맵은 4배(금성은 7배) 미리 증폭해 두었으므로 5/S를 넘긴다.
             if (p.name == "Mercury") { p.realRadius = 0.19f; p.realOrbit = 195.0f; p.normalAmp = 5.0f / 4.0f; }
