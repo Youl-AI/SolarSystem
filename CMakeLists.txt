@@ -71,3 +71,55 @@ target_include_directories(VulkanApp PRIVATE
 target_compile_definitions(VulkanApp PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 target_link_libraries(VulkanApp PRIVATE glfw glm Vulkan::Vulkan)
+
+# =========================================================
+# 셰이더 컴파일
+#
+# .spv는 빌드 산출물이라 .gitignore에 걸려 있다. 그래서 저장소를 새로 클론해 빌드하면
+# 실행 파일은 만들어져도 실행하는 순간 셰이더를 못 찾고 죽었다(readFile이 크기를 -1로
+# 읽어 "vector too long"으로 터진다). 여기서 함께 구워야 클론 후 바로 실행된다.
+#
+# 결과물은 shaders/ 안에 둔다. 실행 파일이 상대 경로로 찾기 때문이다.
+# 목록에 있는 7개가 main.cpp가 실제로 읽는 전부다. blur.frag과 particle.* 은 어디서도
+# 쓰이지 않는 잔재이므로 넣지 않는다(particle.frag은 셰이더도 아니고 main.cpp의 낡은 사본이다).
+# =========================================================
+if(NOT Vulkan_GLSLC_EXECUTABLE)
+    find_program(Vulkan_GLSLC_EXECUTABLE NAMES glslc
+                 HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+endif()
+if(NOT Vulkan_GLSLC_EXECUTABLE)
+    message(FATAL_ERROR "glslc를 찾지 못했습니다. Vulkan SDK를 설치하고 VULKAN_SDK 환경변수를 확인하세요.")
+endif()
+
+# (원본 파일명, 결과 파일명) 쌍. 이름이 서로 다른 것은 main.cpp가 기대하는 이름에 맞춘 것이다.
+set(SHADER_PAIRS
+    shader.vert         vert.spv
+    shader.frag         frag.spv
+    post.vert           post_vert.spv
+    post.frag           post_frag.spv
+    bloom_down.frag     bloom_down_frag.spv
+    bloom_up.frag       bloom_up_frag.spv
+    asteroid_cull.comp  asteroid_cull.spv
+)
+
+set(SHADER_OUTPUTS "")
+list(LENGTH SHADER_PAIRS SHADER_PAIRS_LEN)
+math(EXPR SHADER_LAST "${SHADER_PAIRS_LEN} - 2")
+foreach(i RANGE 0 ${SHADER_LAST} 2)
+    math(EXPR j "${i} + 1")
+    list(GET SHADER_PAIRS ${i} shader_src)
+    list(GET SHADER_PAIRS ${j} shader_out)
+    set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader_src}")
+    set(dst "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader_out}")
+    add_custom_command(
+        OUTPUT  "${dst}"
+        COMMAND "${Vulkan_GLSLC_EXECUTABLE}" "${src}" -o "${dst}"
+        DEPENDS "${src}"
+        COMMENT "glslc ${shader_src} -> ${shader_out}"
+        VERBATIM
+    )
+    list(APPEND SHADER_OUTPUTS "${dst}")
+endforeach()
+
+add_custom_target(Shaders DEPENDS ${SHADER_OUTPUTS})
+add_dependencies(VulkanApp Shaders)
