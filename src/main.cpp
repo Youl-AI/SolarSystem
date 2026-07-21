@@ -152,6 +152,10 @@ struct Planet {
     int parentIndex = -1; 
 
     glm::mat4 currentModelMat; glm::dvec3 currentPosition; glm::mat4 cloudModelMat;
+
+    // 이번 프레임에 실제로 그려지는 반지름(축척 전환 중에는 radius와 realRadius 사이의 보간값).
+    // 카메라가 천체 안에 들어갔는지 판정할 때 radius를 쓰면 실제 크기와 어긋난다.
+    float currentRenderRadius = 0.0f;
     VkImageView viewDiffuse, viewNight, viewSpecular, viewNormal, viewClouds;
     VkDescriptorSet descriptorSet;
 };
@@ -850,7 +854,7 @@ protected:
         // 1. 내행성 (수~화)
         planets.push_back(createPlanet("Mercury", 0, 0.11f, 3.50f, 15.00f, 0.205f, 0.43f, 0.03f, 7.0f, 77.0f, 48.0f, 120.0f, 45.0f, false, "textures/planets/8k_mercury.jpg", "", "", "textures/planets/mercury_normal.png", ""));  // index 0
         planets.push_back(createPlanet("Venus", 0, 0.19f, 4.80f, 11.00f, 0.006f, 0.1f, 177.36f, 3.4f, 131.0f, 76.0f, 30.0f, 100.0f, true, "textures/planets/8k_venus_surface.jpg", "", "", "textures/planets/venus_normal.png", "textures/planets/venus_atmosphere.jpg"));  // index 1
-        planets.push_back(createPlanet("Earth", 0, 0.20f, 6.00f, 10.00f, 0.016f, 25.0f, 23.44f, 0.0f, 102.0f, 0.0f, 200.0f, 0.0f, true, "textures/planets/8k_earth.jpg", "textures/planets/8k_earth_nightmap.jpg", "textures/planets/8k_earth_specular.png", "textures/planets/earth_normal.png", "textures/planets/8k_earth_clouds.jpg"));  // index 2
+        planets.push_back(createPlanet("Earth", 0, 0.20f, 6.00f, 10.00f, 0.016f, 25.0f, 23.44f, 0.0f, 102.0f, 0.0f, 200.0f, 0.0f, true, "textures/planets/earth_diffuse.jpg", "textures/planets/8k_earth_nightmap.jpg", "textures/planets/8k_earth_specular.png", "textures/planets/earth_normal.png", "textures/planets/8k_earth_clouds.jpg"));  // index 2
         planets.push_back(createPlanet("Mars", 0, 0.14f, 7.50f, 8.50f, 0.093f, 24.3f, 25.19f, 1.85f, 336.0f, 49.0f, 310.0f, 210.0f, false, "textures/planets/8k_mars.jpg", "", "", "textures/planets/mars_normal.png", ""));  // index 3
         
         // 2. 소행성대 (세레스가 11.0에서 기준선 역할을 합니다)
@@ -1525,6 +1529,7 @@ protected:
         for (int i = 0; i < planets.size(); i++) {
             auto &planet = planets[i];
             float curRadius = glm::mix(planet.radius, planet.realRadius, easeScale);
+            planet.currentRenderRadius = curRadius;
 
             glm::mat4 trajectory = glm::translate(glm::mat4(1.0f), relativeToCamera(planet.currentPosition));
 
@@ -1547,6 +1552,7 @@ protected:
         }
 
         float curMoonRadius = glm::mix(moon.radius, moon.realRadius, easeScale);
+        moon.currentRenderRadius = curMoonRadius;
         glm::mat4 moonBase = glm::translate(glm::mat4(1.0f), relativeToCamera(moon.currentPosition));
         glm::mat4 moonRot = glm::rotate(glm::mat4(1.0f), glm::radians(moon.axisDirection), glm::vec3(0.0f, 1.0f, 0.0f))
                           * glm::rotate(glm::mat4(1.0f), glm::radians(moon.axialTilt), glm::vec3(0.0f, 0.0f, 1.0f))
@@ -2200,9 +2206,16 @@ protected:
             drawObject(sun, sun.currentModelMat, sun.typeId); 
         }
 
+        // 카메라가 천체 안에 들어갔을 때만 건너뛴다.
+        //
+        // 예전에는 기준이 planet.radius * 1.2f 였는데, 카메라의 최소 거리도 같은 식
+        // (targetRadius * 1.2f)이라 기본 축척에서는 두 값이 정확히 같아졌다. 확대해서
+        // 최소 거리에 도달하면 부동소수점 잡음만으로 판정이 매 프레임 뒤집혀 행성이
+        // 통째로 명멸했다. 실제 축척에서는 최소 거리가 realRadius 기준이라 증상이 없었다.
+        // 이제는 실제로 그려지는 반지름을 쓰고, 최소 거리보다 20% 안쪽에서만 걸린다.
         for (const auto &planet : planets) {
             float distToPlanet = glm::length(currentCameraPos - glm::vec3(planet.currentPosition));
-            if (distToPlanet > (planet.radius * 1.2f)) {
+            if (distToPlanet > planet.currentRenderRadius) {
                 drawObject(planet, planet.currentModelMat, planet.typeId);
                 if (planet.hasClouds) drawObject(planet, planet.cloudModelMat, 2);
                 if (planet.name == "Saturn") {
@@ -2215,7 +2228,7 @@ protected:
         }
 
         float distToMoon = glm::length(currentCameraPos - glm::vec3(moon.currentPosition));
-        if (distToMoon > (moon.radius * 1.2f)) {
+        if (distToMoon > moon.currentRenderRadius) {
             drawObject(moon, moon.currentModelMat, moon.typeId);
         }
         
@@ -2264,7 +2277,8 @@ protected:
         for (const auto &planet : planets) {
             if (!planet.hasAtmosphere) continue;
             float d = glm::length(currentCameraPos - glm::vec3(planet.currentPosition));
-            if (d > planet.radius * 1.2f) drawObject(planet, planet.atmosphereModelMat, 11);
+            // 껍질 안쪽에 들어갔을 때만 건너뛴다(본체와 같은 이유로 기준을 바꿨다).
+            if (d > planet.currentRenderRadius * kAtmosphereShellScale) drawObject(planet, planet.atmosphereModelMat, 11);
         }
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
