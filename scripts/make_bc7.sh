@@ -28,8 +28,8 @@ textures/planets/8k_mercury.jpg
 textures/planets/8k_venus_surface.jpg
 textures/planets/venus_atmosphere.jpg
 textures/planets/earth_diffuse.png
-textures/planets/8k_earth_nightmap.jpg
-textures/planets/8k_earth_clouds.jpg
+textures/planets/earth_night.png
+textures/planets/earth_clouds.png
 textures/planets/8k_mars.jpg
 textures/planets/8k_jupiter.jpg
 textures/planets/8k_saturn.jpg
