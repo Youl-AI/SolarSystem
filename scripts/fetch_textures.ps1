@@ -16,7 +16,7 @@
 $ErrorActionPreference = "Stop"
 
 $Tag  = "textures-v1"
-$Base = "https://github.com/Youl-AI/SolarSystem/releases/download/$Tag"
+$Base = "https://github.com/Youl-AI/Ephemeris/releases/download/$Tag"
 
 # 받을 파일과 기대 크기(바이트). 크기를 적어 두면 중간에 끊긴 파일을 그냥 넘어가지 않는다.
 $Files = @(
@@ -65,7 +65,7 @@ foreach ($f in $Files) {
         Write-Host "실패: $name" -ForegroundColor Red
         Write-Host "  $($_.Exception.Message)"
         Write-Host "  Release '$Tag' 에 파일이 올라가 있는지 확인하세요:"
-        Write-Host "  https://github.com/Youl-AI/SolarSystem/releases/tag/$Tag"
+        Write-Host "  https://github.com/Youl-AI/Ephemeris/releases/tag/$Tag"
         exit 1
     }
 

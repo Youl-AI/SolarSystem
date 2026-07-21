@@ -17,7 +17,8 @@
 # 확인 방법: 같은 이미지를 -f BC7_UNORM으로도 굽고 헤더 148바이트 이후를 바이트 비교한다.
 # 디코더로 값을 비교하면 안 된다 — 디코드 경로가 역변환을 걸어 차이를 지워버린다.
 set -e
-R="c:/Users/hayoul1999.YOUL-HOUSE/Desktop/Github/SolarSystem"
+# 저장소 루트. 특정 PC의 절대 경로가 박혀 있어 다른 곳에서는 동작하지 않았다.
+R="$(cd "$(dirname "$0")/.." && pwd)"
 TEXCONV="$(dirname "$0")/texconv.exe"
 
 # diffuse / night / clouds 슬롯 = sRGB
