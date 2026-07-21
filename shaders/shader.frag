@@ -730,25 +730,7 @@ void main() {
         writeOut(vec4(finalColor, 1.0));
         return;
     }
-    // ---------------------------------------------------------
-    // 🌌 우리은하 (오브젝트 타입 10) - 투명 발광 디스크
-    // ---------------------------------------------------------
-    else if (fragObjectType == 10) {
-        vec4 galaxyTex = texture(texDiffuse, fragTexCoord);
-
-        float brightness = max(max(galaxyTex.r, galaxyTex.g), galaxyTex.b);
-        float distToCenter = length(fragTexCoord - vec2(0.5));
-        float edgeFade = smoothstep(0.48, 0.2, distToCenter);
-
-        // C++에서 계산한 거리 기반 페이드인(0~1). 곡선은 main.cpp에서 smoothstep으로 부드럽게 처리.
-        float distanceFade = push.customData;
-
-        float alpha = brightness * edgeFade * distanceFade;
-        if (alpha < 0.02) discard;
-
-        vec3 finalColor = galaxyTex.rgb * vec3(0.85, 0.95, 1.3);
-
-        writeOut(vec4(finalColor * 1.5, alpha * 0.8));
-        return;
-    }
+    // 타입 10은 멀리 축소하면 떠오르던 은하 원반이었다. 하늘 큐브맵은 은하 안에서 밖을
+    // 본 모습이고 원반은 은하를 밖에서 본 모습이라, 둘이 함께 보이면 관측자가 은하 안에도
+    // 밖에도 있게 된다. 원반 쪽을 없앴다.
 }

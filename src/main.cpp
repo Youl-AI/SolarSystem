@@ -258,9 +258,7 @@ private:
     VkDeviceMemory memSkyBand = VK_NULL_HANDLE;
     VkImageView viewSkyBand = VK_NULL_HANDLE;
 
-    Planet sun, moon, saturnRing, milkyWay;
-    uint32_t galaxyIndexCount = 0, galaxyFirstIndex = 0;
-    int32_t galaxyVertexOffset = 0;
+    Planet sun, moon, saturnRing;
     std::vector<Planet> planets;
 
     // 고정된 천체의 궤도선은 매 프레임 CPU에서 double로, 카메라 상대 좌표로 다시 만든다.
@@ -839,11 +837,6 @@ protected:
 
         orbitIndexCount = static_cast<uint32_t>(indices.size()) - orbitFirstIndex;
 
-        galaxyVertexOffset = static_cast<int32_t>(vertices.size());
-        galaxyFirstIndex = static_cast<uint32_t>(indices.size());
-        generateGalaxyDisk(1.0f, 64);
-        galaxyIndexCount = static_cast<uint32_t>(indices.size()) - galaxyFirstIndex;
-
         // 1. 4종류의 소행성 모델 순차적 로딩 (대소문자 완벽 일치)
         std::string objPaths[4] = {
             "textures/asteroids/Bennu_Radar.obj",
@@ -971,8 +964,6 @@ protected:
             // 🚀 [수정됨] 소행성은 궤도 연산을 SSBO에서 따로 하므로, 추가된 5대 요소 자리에 0.0f 5개를 빵꾸울워 줍니다!
             asteroidTypes[i] = createPlanet("AsteroidType" + std::to_string(i), 8, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, texPaths[i], "", "", "", "");
         }
-
-        milkyWay = createPlanet("Milky Way", 10, 200000.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/milkyway.png", "", "", "", "");
 
         // =========================================================
         // 🚀 [NEW] 리얼 스케일(Real Scale) 타겟 데이터 주입
@@ -2469,33 +2460,11 @@ protected:
         }
         
         tsMark(cb, 4); // 행성/스카이박스 끝
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &milkyWay.descriptorSet, 0, nullptr);
-        
-        float galaxyDrop = glm::mix(-15.0f, -2000.0f, scaleLerp);
-        
-        float fadeStart = glm::mix(1500.0f, 250000.0f, scaleLerp);
-        float fadeEnd   = glm::mix(5000.0f, 900000.0f, scaleLerp); 
-        
-        float galaxyAlpha = (camera.currentDistance - fadeStart) / (fadeEnd - fadeStart);
-        galaxyAlpha = std::clamp(galaxyAlpha, 0.0f, 1.0f);
-        // pow(t,3)은 거의 안 보이다가 끝에서 확 뜨는 딱딱한 곡선이라 부자연스러웠다.
-        // smoothstep(ease-in-out)으로 바꿔 자연스럽게 서서히 나타나게 한다.
-        galaxyAlpha = galaxyAlpha * galaxyAlpha * (3.0f - 2.0f * galaxyAlpha);
-        
-        // 🚀 [핵심 추가] 천문학적 고증: 은하의 중심핵(Core)을 태양계로부터 X축 방향으로 확 밀어냅니다!
-        // 우리 태양계는 은하 중심으로부터 반경의 약 60% 지점에 위치해 있습니다.
-        float galaxyOffsetX = milkyWay.radius * 0.35f; 
 
-        // 🚀 [수정됨] glm::translate의 X축 위치에 galaxyOffsetX를 넣어줍니다.
-        // 이제 태양계(0.0)는 중심핵에서 한참 떨어진 나선팔 쪽에 위치하게 됩니다.
-        glm::mat4 mwModel = glm::translate(glm::mat4(1.0f), relativeToCamera(glm::dvec3(galaxyOffsetX, galaxyDrop, 0.0)))
-                          * glm::rotate(glm::mat4(1.0f), glm::radians(60.0f), glm::vec3(1.0f, 0.0f, 0.0f)) 
-                          * glm::rotate(glm::mat4(1.0f), currentAppTime * 0.0005f, glm::vec3(0.0f, 1.0f, 0.0f)) 
-                          * glm::scale(glm::mat4(1.0f), glm::vec3(milkyWay.radius));
-                          
-        PushConstants mwPush{mwModel, 10, galaxyAlpha}; 
-        vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &mwPush);
-        vkCmdDrawIndexed(cb, galaxyIndexCount, 1, galaxyFirstIndex, galaxyVertexOffset, 0);
+        // 여기에는 멀리 축소했을 때 떠오르던 은하 원반(Milkyway.png를 입힌 판)이 있었다.
+        // 하늘 큐브맵이 은하 안에서 밖을 본 모습인데 원반은 은하를 밖에서 본 모습이라,
+        // 둘이 동시에 보이면 관측자가 은하 안에도 밖에도 있는 셈이 된다. 게다가 원반은
+        // 1229x1229짜리 그림 한 장이라 실측 성도와 나란히 두기에 근거가 약했다.
 
         // 대기 껍질은 배경이 전부 깔린 뒤에 그려야 한다.
         //
@@ -2979,17 +2948,6 @@ private:
             // 🚀 빛 번짐(Bloom) 폭주 방지: 형광 노란색의 채도는 유지하되 밝기를 0.2, 0.4 수준으로 낮춥니다.
             vertices.push_back({glm::vec3(cosf(angle), 0.0f, sinf(angle)), glm::vec3(0.2f, 0.4f, 0.0f), glm::vec2(0.0f), glm::vec3(0, 1, 0)});
             indices.push_back(i);
-        }
-    }
-    void generateGalaxyDisk(float radius, int sectorCount) {
-        vertices.push_back({glm::vec3(0.0f), glm::vec3(1.0f), glm::vec2(0.5f, 0.5f), glm::vec3(0, 1, 0)}); // 중심점
-        for (int i = 0; i <= sectorCount; ++i) {
-            float angle = (float)i / sectorCount * 2.0f * M_PI;
-            float u = 0.5f + 0.5f * cosf(angle); float v = 0.5f + 0.5f * sinf(angle);
-            vertices.push_back({glm::vec3(radius * cosf(angle), 0.0f, radius * sinf(angle)), glm::vec3(1.0f), glm::vec2(u, v), glm::vec3(0, 1, 0)});
-        }
-        for (int i = 1; i <= sectorCount; ++i) {
-            indices.push_back(0); indices.push_back(i); indices.push_back(i + 1);
         }
     }
     // BC6H로 미리 구운 큐브맵 DDS를 읽는다. 성공하면 true.
