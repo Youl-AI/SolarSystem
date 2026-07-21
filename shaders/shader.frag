@@ -481,8 +481,15 @@ void main() {
         vec3 sunlightColor = mix(vec3(1.0, 1.0, 1.0), vec3(1.0, 0.35, 0.1), terrainSunsetMask); // 흰빛 -> 주황빛
         
         float diff = max(surfaceNdotL, 0.0) * shadow; 
-        float spec = pow(max(dot(preciseNormal, normalize(lightDir + viewDir)), 0.0), 16.0);
-        vec3 specular = vec3(0.15) * spec * texture(texSpecular, uv).r * shadow;
+        // 바다의 태양 반사. 지수는 DSCOVR/EPIC 사진에서 재서 맞췄다.
+        // 실제 사진의 바다 밝기는 태양 직하점에서 79, 13도에서 61, 22도에서 55(최저)로
+        // 반사가 13도 안쪽에서 끝난다. 지수 16은 절반 밝기 지점이 33도라 2.5배 넓어서
+        // 원반의 넓은 면적이 뿌옇게 떴다. 180이면 그 지점이 10도로 실측에 맞는다.
+        float spec = pow(max(dot(preciseNormal, normalize(lightDir + viewDir)), 0.0), 180.0);
+        // 세기는 0.15에서 크게 낮췄다. 실제 태양 반사는 파도에 잘게 부서지고 구름에 가려
+        // 얼룩덜룩한데, 매끈한 구면에 퐁 반사를 얹으면 그 대신 큰 흰 원반이 생겨 눈에 거슬린다.
+        // 좁힌 로브에 약한 세기를 조합해 존재만 남긴다.
+        vec3 specular = vec3(0.035) * spec * texture(texSpecular, uv).r * shadow;
         
         float dayMix = smoothstep(-0.2, 0.2, surfaceNdotL);
         float eclipseMix = smoothstep(0.0, 1.0, shadow); 
