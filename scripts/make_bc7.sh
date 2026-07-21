@@ -58,6 +58,17 @@ textures/asteroids/Itokawa.jpg
 LINEAR="
 textures/planets/8k_earth_specular.png
 "
+# 노말맵 = BC5(2채널). z는 셰이더가 sqrt(1-x^2-y^2)로 복원한다.
+# -dx10을 반드시 준다. 없으면 texconv가 구식 FourCC "BC5U" 헤더로 저장하는데,
+# 그러면 DX10 확장 헤더가 없어 데이터 시작 위치가 148이 아니라 128이 되고 로더가 거른다.
+# 달은 제외한다 — 블록 압축 오차가 크레이터 테두리에 몰려(평탄부 0.70도 대 테두리 2.61도)
+# 하필 가장 눈에 띄는 곳을 뭉갠다. 나머지는 0.16~0.70도라 문제되지 않는다.
+NORMAL="
+textures/planets/mercury_normal.png
+textures/planets/venus_normal.png
+textures/planets/earth_normal.png
+textures/planets/mars_normal.png
+"
 
 conv() {
   local fmt="$1"; local extra="$2"; shift 2
@@ -74,3 +85,5 @@ echo "=== sRGB (BC7_UNORM_SRGB)"
 conv BC7_UNORM_SRGB "-srgbi" $SRGB
 echo "=== 선형 (BC7_UNORM)"
 conv BC7_UNORM "" $LINEAR
+echo "=== 노말맵 (BC5_UNORM)"
+conv BC5_UNORM "-dx10" $NORMAL

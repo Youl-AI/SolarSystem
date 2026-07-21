@@ -920,7 +920,9 @@ protected:
         for (auto& p : planets) {
             // 실측 DEM에서 구운 normal 맵은 4배(금성은 7배) 미리 증폭해 두었으므로 5/S를 넘긴다.
             if (p.name == "Mercury") { p.realRadius = 0.19f; p.realOrbit = 195.0f; p.normalAmp = 5.0f / 4.0f; }
-            else if (p.name == "Venus") { p.realRadius = 0.47f; p.realOrbit = 360.0f; p.normalAmp = 5.0f / 7.0f; }
+            // 금성은 7배로 굽고 나서 마젤란 격자 잡음을 걷어내려 1픽셀 평활화를 했고,
+            // 그때 좁아진 8비트 범위를 1.6배로 되돌려 채웠다. 그래서 총 증폭이 7 x 1.6 = 11.2다.
+            else if (p.name == "Venus") { p.realRadius = 0.47f; p.realOrbit = 360.0f; p.normalAmp = 5.0f / 11.2f; }
             else if (p.name == "Earth") { p.realRadius = 0.50f; p.realOrbit = 500.0f; p.hasAtmosphere = true; p.normalAmp = 5.0f / 4.0f; }
             else if (p.name == "Mars") { p.realRadius = 0.26f; p.realOrbit = 760.0f; p.normalAmp = 5.0f / 4.0f; }
             else if (p.name == "Ceres") { p.realRadius = 0.03f; p.realOrbit = 1385.0f; }
@@ -2461,11 +2463,11 @@ private:
         vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
         imageView = createImageView(image, format, VK_IMAGE_ASPECT_COLOR_BIT);
     }
-    // BC7 DDS를 읽어 압축된 블록을 그대로 GPU에 올린다.
+    // 블록 압축 DDS(BC7 색상, BC5 법선)를 읽어 압축된 블록을 그대로 GPU에 올린다.
     //
     // texconv가 내는 DDS는 헤더 124바이트 + DX10 확장 20바이트 뒤에 밉 레벨이 큰 것부터
     // 차례로 붙어 있다. 블록 압축이라 한 레벨의 크기는 4로 올림한 블록 수 x 16바이트다.
-    // GPU가 BC7을 못 쓰면 VK_NULL_HANDLE을 돌려 호출자가 원본 이미지로 물러나게 한다.
+    // GPU가 그 포맷을 못 쓰면 VK_NULL_HANDLE을 돌려 호출자가 원본 이미지로 물러나게 한다.
     VkImageView loadDDS(const std::string &path, bool srgb) {
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) return VK_NULL_HANDLE;
@@ -2476,17 +2478,24 @@ private:
         auto u32 = [&](size_t o) { uint32_t v; memcpy(&v, buf.data() + o, 4); return v; };
         uint32_t height = u32(12), width = u32(16), mips = u32(28);
         bool dx10 = memcmp(buf.data() + 84, "DX10", 4) == 0;
-        if (!dx10) return VK_NULL_HANDLE;              // BC7은 DX10 확장 헤더로만 표현된다
+        if (!dx10) return VK_NULL_HANDLE;              // BC7/BC5는 DX10 확장 헤더로만 표현된다
         uint32_t dxgi = u32(128);
-        if (dxgi != 98 && dxgi != 99) return VK_NULL_HANDLE;   // 98=BC7_UNORM, 99=BC7_UNORM_SRGB
         if (mips == 0) mips = 1;
 
-        VkFormat format = srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+        // 색공간은 호출자가 정한다(DDS 태그가 아니라 슬롯의 용도가 기준이다). BC5는
+        // 법선 전용이라 언제나 선형이다.
+        VkFormat format;
+        if (dxgi == 98 || dxgi == 99)                  // 98=BC7_UNORM, 99=BC7_UNORM_SRGB
+            format = srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+        else if (dxgi == 83)                           // 83=BC5_UNORM
+            format = VK_FORMAT_BC5_UNORM_BLOCK;
+        else
+            return VK_NULL_HANDLE;
         VkFormatProperties props;
         vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
         if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
             static bool warned = false;
-            if (!warned) { std::cerr << "이 GPU는 BC7을 지원하지 않습니다. 원본 텍스처를 씁니다.\n"; warned = true; }
+            if (!warned) { std::cerr << "이 GPU는 블록 압축 텍스처를 지원하지 않습니다. 원본을 씁니다.\n"; warned = true; }
             return VK_NULL_HANDLE;
         }
 
