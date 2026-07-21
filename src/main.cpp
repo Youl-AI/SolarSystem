@@ -49,6 +49,7 @@ struct PushConstants {
 struct AsteroidCullPush {
     alignas(16) glm::mat4 beltModel;
     uint32_t asteroidCount;
+    float scaleLerp;     // 0 = 기본 축척, 1 = 실제 축척. 벨트마다 팽창 배율이 달라서 넘긴다.
 };
 
 // 한 행성계 안에서 서로 그림자를 주고받는 천체 수의 상한.
@@ -163,7 +164,14 @@ struct Planet {
 struct AsteroidData {
     glm::mat4 transform;
     int type;
-    int pad1, pad2, pad3;
+    // 실제 축척으로 갈 때 이 소행성의 '위치'에 곱할 배율. 크기에는 곱하지 않는다.
+    //
+    // 예전에는 벨트 전체에 200배 스케일 하나를 곱해 위치와 크기를 같이 늘렸다. 그러면
+    // 실제 축척에서 소행성 지름이 4만~13만 km가 되어 지구(12,742 km)보다 커진다.
+    // 게다가 배율이 하나뿐이라 두 벨트를 각자 제 위치에 놓을 수 없었다 — 소행성대를
+    // 맞추면 카이퍼벨트가 딸려 들어온다. 배율을 소행성마다 들려 보내 둘 다 푼다.
+    float posScaleReal;
+    int pad2, pad3;
 };
 
 class SolarSystemApp : public VulkanBase {
@@ -826,9 +834,24 @@ protected:
         createColorTexture(128, 128, 255, 255, texDummyFlatNormal, memDummyFlatNormal, viewDummyFlatNormal, VK_FORMAT_R8G8B8A8_UNORM);
 
         // 4. 2만 개의 소행성 데이터 수학적 생성 (다중 모델 부여 포함) 및 SSBO 업로드
-        asteroidTransforms = generateAsteroidBelt(10000, 9.0f, 12.0f, 0.4f, 0.008f, 0.025f); // 소행성대
-        auto kuiperTransforms = generateAsteroidBelt(30000, 75.0f, 100.0f, 1.5f, 0.08f, 0.25f); // 카이퍼벨트
-        asteroidTransforms.insert(asteroidTransforms.end(), kuiperTransforms.begin(), kuiperTransforms.end()); 
+        // 반지름은 기본 축척 기준이고, 마지막 인자가 실제 축척으로 갈 때의 위치 배율이다.
+        // 실제 축척은 1 AU = 500 유닛이므로 소행성대 2.06~3.28 AU = 1030~1640,
+        // 카이퍼벨트 30~50 AU = 15000~25000이 되도록 배율을 각각 118, 242로 잡았다.
+        // 기본 축척 반지름은 그 배율로 나눈 값이라 두 모드가 동시에 맞는다.
+        //
+        // 크기 0.0039~0.025는 실제 축척에서 지름 100~637 km다. 거듭제곱 분포로 뽑으므로
+        // 중앙값은 약 130 km이고 베스타급(525 km)은 드물게 나온다.
+        asteroidTransforms = generateAsteroidBelt(2400, 8.73f, 13.90f, 0.175f, 0.0039f, 0.025f, 118.0f);
+
+        // 카이퍼벨트는 궤도 경사가 두 갈래다. 5도 미만의 얇은 무리(cold)와 20도 안팎까지
+        // 퍼진 무리(hot)가 섞여 있어, 옆에서 보면 얇은 심 위에 두꺼운 후광이 얹힌 모양이다.
+        // 하나의 분포로 뽑으면 그 구조가 사라진다. 섞은 평균이 실제값 12도에 맞도록 나눴다.
+        // 크기 0.0118~0.08은 지름 300~2040 km다. 중앙값은 약 394 km이고 에리스급(2326 km)은
+        // 드물게 나온다. 개수를 10,000으로 잡아도 부피가 소행성대의 4,428배라 훨씬 성기다.
+        for (auto [count, incl] : { std::pair<int, float>{4000, 0.035f}, {6000, 0.31f} }) {
+            auto kuiper = generateAsteroidBelt(count, 62.0f, 103.3f, incl, 0.0118f, 0.08f, 242.0f);
+            asteroidTransforms.insert(asteroidTransforms.end(), kuiper.begin(), kuiper.end());
+        }
         
         // 파이프라인 및 버퍼 초기화 (삭제 불가)
         createVertexBuffer(); createIndexBuffer(); createUniformBuffer();
@@ -951,7 +974,12 @@ protected:
     // =========================================================
     // 🚀 [수정됨] 실제 천문학 기반 소행성대 궤도 생성 알고리즘
     // =========================================================
-    std::vector<AsteroidData> generateAsteroidBelt(int amount, float minRadius, float maxRadius, float yVariance, float minScale, float maxScale) {
+    // inclinationRad = 궤도 경사의 레일리 분포 척도. 실제 소행성대는 평균 10도, 카이퍼벨트는
+    // 12도인데 후자는 5도 미만의 얇은 무리와 20도 안팎으로 퍼진 무리가 섞인 두 갈래다.
+    // posScaleReal = 실제 축척으로 갈 때 위치에 곱할 배율(크기에는 곱하지 않는다).
+    std::vector<AsteroidData> generateAsteroidBelt(int amount, float minRadius, float maxRadius,
+                                                   float inclinationRad, float minScale, float maxScale,
+                                                   float posScaleReal) {
         std::vector<AsteroidData> result;
         result.reserve(amount);
         
@@ -961,30 +989,38 @@ protected:
 
         for (int i = 0; i < amount; i++) {
             glm::mat4 model = glm::mat4(1.0f);
-            float angle = dis(gen) * 2.0f * M_PI;
-            float radius = minRadius + dis(gen) * (maxRadius - minRadius) + normalDis(gen) * 0.5f;
-            float x = radius * cos(angle); float y = normalDis(gen) * yVariance; float z = radius * sin(angle);
-            glm::vec3 pos = glm::vec3(x, y, z);
+            // 반지름은 면적이 고르게 되도록 뽑는다(그냥 균등하게 뽑으면 안쪽이 빽빽해진다).
+            float u = dis(gen);
+            float radius = std::sqrt(minRadius * minRadius + u * (maxRadius * maxRadius - minRadius * minRadius));
+            radius *= 1.0f + normalDis(gen) * 0.10f;              // 이심률로 흩뜨린다
 
-            float inclination = normalDis(gen) * 0.15f; 
-            glm::vec3 tiltAxis = glm::normalize(glm::vec3(dis(gen) * 2.0f - 1.0f, 0.0f, dis(gen) * 2.0f - 1.0f));
-            glm::mat4 orbitTilt = glm::rotate(glm::mat4(1.0f), inclination, tiltAxis);
-            
-            pos = glm::vec3(orbitTilt * glm::vec4(pos, 1.0f));
+            // 궤도면이 기울어 있어 생기는 높이. 궤도 경사 i와 승교점을 뽑아 기하대로 계산한다.
+            // 예전에는 y를 따로 흩뜨린 뒤 전체를 한 번 더 기울여 두 번 겹쳐 넣었다.
+            float angle = dis(gen) * 2.0f * M_PI;
+            float node  = dis(gen) * 2.0f * M_PI;
+            float inc   = inclinationRad * std::sqrt(-2.0f * std::log(std::max(dis(gen), 1e-6f)));  // 레일리 분포
+            glm::vec3 pos(radius * std::cos(angle),
+                          radius * std::sin(inc) * std::sin(angle - node),
+                          radius * std::sin(angle));
             model = glm::translate(model, pos);
 
             float rotAngle = dis(gen) * 2.0f * M_PI;
             glm::vec3 rotAxis = glm::normalize(glm::vec3(dis(gen) * 2.0f - 1.0f, dis(gen) * 2.0f - 1.0f, dis(gen) * 2.0f - 1.0f));
             model = glm::rotate(model, rotAngle, rotAxis);
 
-            float scale = minScale + dis(gen) * (maxScale - minScale);
+            // 크기는 거듭제곱 분포로 뽑는다. 실제 소행성의 크기 분포는 dN/dD ~ D^-3.5로,
+            // 충돌로 잘게 부서진 결과 작은 것이 압도적으로 많고 큰 것은 드물다. 균등하게
+            // 뽑으면 큰 덩어리가 실제보다 훨씬 자주 보여 자갈밭처럼 된다.
+            const float q = 3.5f;
+            float lo = std::pow(minScale, 1.0f - q), hi = std::pow(maxScale, 1.0f - q);
+            float scale = std::pow(lo + dis(gen) * (hi - lo), 1.0f / (1.0f - q));
             model = glm::scale(model, glm::vec3(scale));
             
             // 0~3까지의 무작위 종류 부여
             int type = static_cast<int>(dis(gen) * 4);
             if (type == 4) type = 3; 
 
-            result.push_back({model, type, 0, 0, 0});
+            result.push_back({model, type, posScaleReal, 0, 0});
         }
         return result;
     }
@@ -2139,16 +2175,16 @@ protected:
         // 두 벨트 전부가 항상 최고 LOD로 떨어져 매 프레임 수천만 삼각형을 그렸다.
         float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp);
         // 행성들의 평균 팽창 비율(약 200배)을 스케일에 곱해 벨트 전체를 우주 외곽으로 밀어냅니다.
-        float beltScale = glm::mix(1.0f, 200.0f, easeScale);
+        // 벨트 팽창은 여기서 하지 않는다. 벨트마다 배율이 다르고(소행성대 118, 카이퍼벨트 242)
+        // 크기에는 곱하면 안 되기 때문이다. 소행성마다 든 배율로 컴퓨트 셰이더가 위치만 늘린다.
         // 소행성 행렬(SSBO)은 월드 원점 기준이므로, 원점을 렌더 좌표계로 옮겨 앞에 붙인다.
         glm::mat4 astRot = glm::translate(glm::mat4(1.0f), relativeToCamera(glm::dvec3(0.0)))
                          * glm::rotate(glm::mat4(1.0f), currentAppTime * 0.05f, glm::vec3(0.0f, 1.0f, 0.0f));
-        astRot = glm::scale(astRot, glm::vec3(beltScale)); // 전체 입자에 스케일 적용!
 
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
         // 정점 셰이더가 쓰는 것과 동일한 행렬을 넘겨, 컴퓨트가 렌더 좌표계에서 거리를 재게 한다.
-        AsteroidCullPush cullPush{astRot, static_cast<uint32_t>(asteroidTransforms.size())};
+        AsteroidCullPush cullPush{astRot, static_cast<uint32_t>(asteroidTransforms.size()), easeScale};
         vkCmdPushConstants(cb, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cullPush), &cullPush);
 
         uint32_t groupCount = (static_cast<uint32_t>(asteroidTransforms.size()) + 255) / 256;

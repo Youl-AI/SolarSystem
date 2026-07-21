@@ -19,7 +19,8 @@ layout(std140, binding = 0) uniform UBO {
 struct AsteroidData {
     mat4 transform;
     int type;
-    int pad1, pad2, pad3;
+    float posScaleReal;   // 실제 축척으로 갈 때 '위치'에만 곱할 배율 (C++의 AsteroidData와 일치)
+    int pad2, pad3;
 };
 
 // 2. CPU가 맨 처음 딱 한 번만 올려줄 2만 개의 원본 소행성 데이터
@@ -54,6 +55,7 @@ layout(std430, binding = 3) buffer DrawCommands {
 layout(push_constant) uniform BeltPush {
     mat4 beltModel;
     uint asteroidCount; // 실제 소행성 개수. 예전엔 20000이 박혀 있어 절반이 안 그려졌다.
+    float scaleLerp;    // 0 = 기본 축척, 1 = 실제 축척
 } push;
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -104,7 +106,13 @@ void main() {
     // 1. 공전 회전은 push.beltModel에 이미 들어 있다. 예전에는 여기서도 한 번 더 곱한 뒤
     // 그 결과를 그대로 내보내, 정점 셰이더에서 push.model과 다시 곱해지며 회전이 두 번
     // 적용됐다(벨트가 의도한 0.05의 2배 속도로 돌았다).
+    // 실제 축척으로 갈 때 위치만 늘린다. 크기(3x3 부분)는 건드리지 않는다.
+    //
+    // 예전에는 벨트 행렬에 200배 스케일을 넣어 위치와 크기를 함께 늘렸다. 그러면 소행성
+    // 지름이 4만~13만 km가 되어 지구보다 커지고, 배율이 하나뿐이라 소행성대와 카이퍼벨트를
+    // 각자 제 위치에 놓을 수도 없었다. 배율을 소행성마다 들려 보내 둘 다 해결한다.
     mat4 finalTransform = ast.transform;
+    finalTransform[3].xyz *= mix(1.0, ast.posScaleReal, push.scaleLerp);
 
     // 2. 카메라와의 거리 계산 및 LOD 판별
     // 정점 셰이더는 push.model * finalTransform으로 그린다. LOD도 반드시 같은 좌표계에서
