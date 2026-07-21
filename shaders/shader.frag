@@ -185,12 +185,31 @@ float SunVisibility(vec3 P) { return 1.0 - SunDiscOcclusion(P); }
 // 않아도 기하가 알아서 만들어낸다.
 
 const vec3  kRayleigh     = vec3(5.8, 13.5, 33.1); // 1/λ^4 비율 (680 / 550 / 440nm)
-const float kAtmoDensity  = 1.4;                    // 전체 광학 두께(눈으로 맞춘 값)
-const float kAtmoBright   = 0.4;                    // 산란광 밝기.
+// 연직 광학 두께가 실제 지구와 맞도록 잡은 값. 이 상수에 kRayleigh와 척도 높이를 곱하면
+// R 0.040 / G 0.093 / B 0.228이 나오는데, 실제 지구는 0.026 / 0.098 / 0.230이다.
+// 예전 값 1.4는 0.024 / 0.057 / 0.139로 초록·파랑이 실제의 절반이었다.
+const float kAtmoDensity  = 2.3;
+// 산란광 밝기. 광학 두께를 올린 만큼 낮춰 화면 밝기는 그대로 둔다(0.4 x 0.63).
+const float kAtmoBright   = 0.25;
 // 22.0으로 시작했다가 화면이 통째로 흰 공이 됐다. 시선이 대기를 비스듬히 길게 지나는
 // 가장자리에서는 광학 경로가 중심의 18배까지 길어져, 중심을 기준으로 맞추면 림이
 // 15를 넘겨 톤매퍼와 블룸을 동시에 포화시킨다. 림이 1.4 근처에 오도록 잡은 값이다.
 // 밀도를 대신 올리면 소광이 세져 림이 하얗게 바래므로, 파란 대기를 원하면 밝기로 잡아야 한다.
+// 에어로졸(미 산란). 먼지·연무·바다 소금 입자는 공기 분자보다 훨씬 커서 파장을 덜 가리고
+// (옹스트롬 지수 1.3, 레일리의 4에 비해 완만하다) 빛을 앞쪽으로 몰아 보낸다. 그래서
+// 태양을 등지고 보는 원반 한복판은 거의 바뀌지 않고, 빛이 스치듯 지나는 명암 경계와
+// 가장자리에서 연무가 밝게 뜬다. 실제 하늘에서 해 질 녘 지평선이 뿌옇게 빛나는 그 현상이다.
+//
+// 연직 광학 두께가 550nm에서 0.1이 되도록 잡았다(전 지구 평균값). 계수 = 0.1 / 척도높이.
+//
+// 0.2도 시도해 봤다(실제 범위 안의 뿌연 대기). 노을이 진해지지는 않고 가장자리가 그냥
+// 허옇게 밝아지기만 했다. 에어로졸은 파장을 거의 안 가려서 흰 연무를 더할 뿐이고,
+// 노을의 붉은색은 레일리 소광이 파란빛을 걷어내면서 나오기 때문이다.
+const vec3  kMie          = vec3(60.7, 80.0, 106.9);
+const float kMieG         = 0.76;                    // 전방 산란 쏠림 정도
+// 실제 에어로졸은 레일리보다 훨씬 낮게(척도높이 1.2km 대 8.5km) 깔리지만, 시선 적분이
+// 16단계뿐이라 그만큼 얇게 잡으면 층을 건너뛰어 띠가 생긴다. 레일리의 0.42배로 타협했다.
+const float kMieHeightMul = 0.05;
 const float kAtmoShellScale = 1.025;                 // main.cpp의 kAtmosphereShellScale과 일치
 
 // 광선-구 교차. x = 가까운 t, y = 먼 t. 만나지 않으면 x > y가 되어 판별에 쓸 수 있다.
@@ -228,9 +247,13 @@ vec3 AtmosphereScattering(vec3 ro, vec3 rd, vec3 center, float planetR, float at
     const int VIEW_STEPS  = 16;
     const int LIGHT_STEPS = 6;
 
+    float scaleHeightMie = thickness * kMieHeightMul;
+
     float ds = (tEnd - tStart) / float(VIEW_STEPS);
-    vec3  accum = vec3(0.0);
+    vec3  accumRay = vec3(0.0);
+    vec3  accumMie = vec3(0.0);
     float viewOptical = 0.0;
+    float viewOpticalMie = 0.0;
 
     // 일식으로 태양이 가려지면 산란시킬 빛도 줄어든다. 시선 전체에 한 번만 적용해도
     // 충분하다 — 대기 두께에 걸쳐 가림 정도가 눈에 띄게 달라지지는 않는다.
@@ -239,8 +262,10 @@ vec3 AtmosphereScattering(vec3 ro, vec3 rd, vec3 center, float planetR, float at
     for (int i = 0; i < VIEW_STEPS; ++i) {
         vec3  P = ro + rd * (tStart + (float(i) + 0.5) * ds);
         float h = length(P - center) - planetR;
-        float density = exp(-h / scaleHeight) * (ds / planetR);
-        viewOptical += density;
+        float density    = exp(-h / scaleHeight)    * (ds / planetR);
+        float densityMie = exp(-h / scaleHeightMie) * (ds / planetR);
+        viewOptical    += density;
+        viewOpticalMie += densityMie;
 
         vec3 L = normalize(ubo.sunPos - P);
 
@@ -253,24 +278,37 @@ vec3 AtmosphereScattering(vec3 ro, vec3 rd, vec3 center, float planetR, float at
         vec2  lightExit = raySphere(P, L, center, atmoR);
         float lds = max(lightExit.y, 0.0) / float(LIGHT_STEPS);
         float lightOptical = 0.0;
+        float lightOpticalMie = 0.0;
         for (int j = 0; j < LIGHT_STEPS; ++j) {
             vec3 Q = P + L * ((float(j) + 0.5) * lds);
-            float hq = (length(Q - center) - planetR) / scaleHeight;
+            float hAbs = length(Q - center) - planetR;
             // 지면 아래에서 지수가 폭주해 inf/NaN이 되지 않도록 상한을 둔다.
-            lightOptical += exp(-clamp(hq, -12.0, 60.0)) * (lds / planetR);
+            lightOptical    += exp(-clamp(hAbs / scaleHeight,    -12.0, 60.0)) * (lds / planetR);
+            lightOpticalMie += exp(-clamp(hAbs / scaleHeightMie, -12.0, 60.0)) * (lds / planetR);
         }
 
         // 태양 -> 이 지점 -> 눈까지 오는 동안 흩어져 사라진 만큼을 감쇠시킨다.
         // 파란빛이 먼저 사라지므로, 빛이 대기를 길게 지나온 명암 경계에서는 붉은빛만 남는다.
-        vec3 tau = min(kRayleigh * kAtmoDensity * (viewOptical + lightOptical), vec3(80.0));
-        accum += density * exp(-tau);
+        vec3 tau = min(kRayleigh * kAtmoDensity * (viewOptical + lightOptical)
+                     + kMie * (viewOpticalMie + lightOpticalMie), vec3(80.0));
+        vec3 trans = exp(-tau);
+        accumRay += density    * trans;
+        accumMie += densityMie * trans;
     }
 
-    // 레일리 위상함수. 전방/후방 산란이 측방보다 강해서 역광일 때 대기가 링처럼 빛난다.
+    // mu는 입사 진행 방향과 산란 후 진행 방향이 이루는 각의 코사인이다. 태양을 등지고
+    // 볼 때 -1(후방 산란), 태양 쪽 가장자리를 스쳐볼 때 +1(전방 산란)이 된다.
     float mu = dot(rd, normalize(ubo.sunPos - ro));
-    float phase = 0.75 * (1.0 + mu * mu);
 
-    return accum * kRayleigh * kAtmoDensity * phase * kAtmoBright * sunVis;
+    // 레일리 위상함수. 전방/후방 산란이 측방보다 강해서 역광일 때 대기가 링처럼 빛난다.
+    float phaseRay = 0.75 * (1.0 + mu * mu);
+    // 헤니-그린스타인. 전방으로 강하게 쏠려, 태양 쪽 가장자리에서만 연무가 밝게 뜬다.
+    float g2 = kMieG * kMieG;
+    float phaseMie = (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * kMieG * mu, 1e-4), 1.5);
+
+    vec3 scattered = accumRay * kRayleigh * kAtmoDensity * phaseRay
+                   + accumMie * kMie * phaseMie;
+    return scattered * kAtmoBright * sunVis;
 }
 
 void main() {
