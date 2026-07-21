@@ -224,7 +224,12 @@ scripts\run_dev.bat
 | 달 텍스처 (`8k_moon.jpg`) | [Solar System Scope](https://www.solarsystemscope.com/textures/) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
 | 갈릴레이 위성·타이탄 (`4k_*.jpg`, `io_glow.png`) | [CelestiaContent](https://github.com/CelestiaProject/CelestiaContent) — 아래 상세 | [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) / [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
 | 실측 지형 노말맵 (`*_normal.dds`, `moon_normal.png`) | NASA / USGS / NOAA 탐사선 고도 데이터 — 아래 상세 | 퍼블릭 도메인 |
+| 실행 파일 아이콘 | [Space Travel](https://www.flaticon.com/kr/free-icon/space-travel_2733062) — amonrat rungreangfangsai | [Flaticon 무료 라이선스](https://www.freepikcompany.com/legal#nav-flaticon) (저작자 표시 필수) |
 | 텍스처 도구 (`scripts/texconv.exe`, `texassemble.exe`) | [DirectXTex](https://github.com/microsoft/DirectXTex) (Microsoft) | MIT |
+
+실행 파일 아이콘의 표기 문구입니다:
+
+> <a href="https://www.flaticon.com/kr/free-icons/" title="우주 아이콘">우주 아이콘 제작자: amonrat rungreangfangsai - Flaticon</a>
 
 ### 별하늘 상세
 
