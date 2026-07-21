@@ -2028,7 +2028,7 @@ protected:
             // 타이틀
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.93f, 1.0f, 1.0f));
             ImGui::SetWindowFontScale(2.3f);
-            TextCentered("SOLAR SYSTEM ENGINE");
+            TextCentered("E P H E M E R I S");
             ImGui::SetWindowFontScale(1.0f);
             ImGui::PopStyleColor();
 
@@ -2049,7 +2049,7 @@ protected:
             // 태그라인 (자간을 넓힌 HUD 느낌으로 공백 삽입)
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.62f, 0.72f, 1.0f));
             ImGui::SetWindowFontScale(0.95f);
-            TextCentered("R E A L - T I M E   V U L K A N   S I M U L A T I O N     v2.0");
+            TextCentered("A   M E A S U R E D   S O L A R   S Y S T E M");
             ImGui::SetWindowFontScale(1.0f);
             ImGui::PopStyleColor();
 
@@ -3374,7 +3374,7 @@ int main() {
     } catch (const std::exception &e) { 
         // 🚀 [핵심 해결] CMD 창이 없어도, 크래시가 나면 윈도우 에러 창을 띄워서 원인을 알려줍니다!
 #ifdef _WIN32
-        MessageBoxA(nullptr, e.what(), "Vulkan Engine Fatal Error", MB_OK | MB_ICONERROR);
+        MessageBoxA(nullptr, e.what(), "Ephemeris — Fatal Error", MB_OK | MB_ICONERROR);
 #else
         std::cerr << e.what() << std::endl; 
 #endif

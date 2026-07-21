@@ -144,7 +144,7 @@ protected:
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-        window = glfwCreateWindow(WIDTH, HEIGHT, "Solar System Engine v2.0", nullptr, nullptr);
+        window = glfwCreateWindow(WIDTH, HEIGHT, "Ephemeris", nullptr, nullptr);
         glfwSetWindowUserPointer(window, this);
         glfwSetMouseButtonCallback(window, mouseButtonCallback);
         glfwSetCursorPosCallback(window, cursorPosCallback);

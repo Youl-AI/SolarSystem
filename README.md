@@ -1,18 +1,25 @@
-# Solar System
+# Ephemeris
+
+**측정된 태양계** — Vulkan API로 밑바닥부터 만든 실시간 시뮬레이터
 
 ![C++](https://img.shields.io/badge/Language-C%2B%2B17-blue)
 ![Vulkan](https://img.shields.io/badge/API-Vulkan%201.2-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/Code-MIT-lightgrey)
 
-Vulkan API로 밑바닥부터 만든 태양계 시뮬레이터입니다. 상용 엔진을 쓰지 않고
-디바이스 관리, 스왑체인, 렌더 패스까지 직접 구현했습니다.
-
 ![Demo](assets/demo.gif)
 
-목표는 **보기 좋은 그림이 아니라 사실에 맞는 그림**입니다. 지형은 탐사선이 실제로
-측정한 고도 자료에서 굽고, 별하늘은 Gaia가 관측한 실제 별 위치를 씁니다. 눈에
-그럴듯해 보이는 값보다 측정으로 뒷받침되는 값을 택합니다.
+*Ephemeris*(천체력)는 천체가 시각마다 **실제로 어디에 있었는지 기록한 표**입니다.
+이 프로젝트의 원칙이 그 단어에 담겨 있습니다 — **보기 좋은 그림이 아니라 사실에 맞는
+그림**을 목표로 합니다.
+
+- 지형 요철은 탐사선이 실제로 측정한 고도 자료(LOLA, MOLA, MESSENGER, Magellan,
+  ETOPO)에서 굽습니다.
+- 별하늘은 Gaia가 관측한 실제 별 위치를 쓰고, 개수는 실제 한계등급에 맞춥니다.
+- 해왕성은 흔히 알려진 진한 파랑이 아니라 [2024년에 정정된 실제 색](https://www.ox.ac.uk/news/2024-01-05-new-images-reveal-what-neptune-and-uranus-really-look-0)을 씁니다.
+- 소행성대는 실제 궤도 요소 분포와 충돌 파편의 크기 분포를 따릅니다.
+
+상용 엔진을 쓰지 않고 디바이스 관리, 스왑체인, 렌더 패스까지 직접 구현했습니다.
 
 ---
 
@@ -96,7 +103,7 @@ cmake --build build --config Release
 ### 실행
 
 ```bash
-build\Release\VulkanApp.exe
+build\Release\Ephemeris.exe
 ```
 
 > **저장소 루트에서 실행해야 합니다.** 실행 파일이 `textures/`와 `shaders/`를 상대

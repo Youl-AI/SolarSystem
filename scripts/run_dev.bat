@@ -21,10 +21,10 @@ REM This script lives in scripts\, so step up to the repository root.
 REM The executable resolves textures\ and shaders\ relatively and must start there.
 cd /d "%~dp0.."
 
-if not exist "build\Release\VulkanApp.exe" (
-    echo build\Release\VulkanApp.exe not found. Build it first:
+if not exist "build\Release\Ephemeris.exe" (
+    echo build\Release\Ephemeris.exe not found. Build it first:
     echo   cmake --build build --config Release
     exit /b 1
 )
 
-build\Release\VulkanApp.exe %*
+build\Release\Ephemeris.exe %*
