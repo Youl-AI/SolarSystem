@@ -19,7 +19,46 @@ layout(binding = 2) uniform sampler2D texNight;
 layout(binding = 3) uniform sampler2D texSpecular;
 layout(binding = 4) uniform sampler2D texNormalDisp;
 layout(binding = 5) uniform sampler2D texClouds;
-layout(binding = 6) uniform samplerCube skyboxTex;
+layout(binding = 6) uniform samplerCube skyboxTex;   // hiptyc: 히파르코스/티코의 밝은 별
+layout(binding = 8) uniform samplerCube skyBandTex;  // milkyway: 은하수 확산광 + 어두운 별
+
+// ── 실제 축척에서의 하늘 상수 ─────────────────────────────────────────────
+// 눈대중이 아니라 scratchpad/sky_calibrate.py의 측정으로 정했다.
+//
+// 배율 0.593: 국소 최대점이 전천 9,100개(대기 없는 우주의 맨눈 한계 6.5등급)가 되는
+//   원시값 문턱이 0.2578이었다(실측 9,102개). 그 문턱이 화면 가시 문턱 0.02에
+//   걸리도록 맞춘 값이라, 그보다 어두운 별은 화면에서 사라진다.
+//
+// 감마 2.5: 여기엔 타협이 있다. 원본이 1.0에서 클리핑돼 있어 가장 어두운 별과 가장
+//   밝은 별의 비가 5.7배뿐인데(실제로는 6.5등급과 -1.5등급 사이가 1585배), 이 좁은
+//   범위를 감마로 늘려야 한다.
+//     - 개수 분포를 실제와 맞추려면 감마 0.82다. 관측된 전천 별 수는 등급당 10^0.50배씩
+//       늘어 N ~ F^-1.25인데, 이 텍스처는 N ~ v^-1.026이라 그 비를 맞추는 값이다.
+//       그런데 이러면 가장 밝은 별이 화면에서 0.084라 눈에 띄는 별이 하나도 없다.
+//     - 밝은 별이 제대로 빛나려면(1.5 이상) 감마 2.5가 필요하다. 대신 개수 분포의
+//       기울기가 0.41로 실제(1.25)보다 완만해진다.
+//   별 개수 자체는 어느 쪽이든 9,100개로 같다(문턱이 정하므로). 감마는 그 위쪽의
+//   밝기 분포만 바꾼다. 밝은 별이 보이는 쪽을 택했다.
+#define SKY_STAR_GAMMA  2.5
+#define SKY_STAR_SCALE  0.593
+
+// 은하수 층 배율 3.087: 띠가 화면에서 0.07이 되게 한다. 실제 은하수는 밤하늘 배경보다
+//   2~4배 밝은 정도의 희미한 띠다.
+//
+// LOD 편향 2.0: 이 층에는 확산광뿐 아니라 어두운 Gaia 별도 들어 있어서, 그냥 배율만
+//   곱하면 그 별들이 되살아나 개수가 두 배가 된다(전천 9,083개 추가). 감마로는 못 막는다 —
+//   띠(0.027)가 그 별들보다 어두워서 감마를 걸면 띠가 먼저 사라진다.
+//   낮은 밉을 쓰면 해결된다. 실제로 맨눈에는 어두운 별이 분해되지 않고 은하수
+//   확산광으로 뭉쳐 보이므로, 물리적으로도 이쪽이 맞다.
+//   측정: 밉 2단계에서 분해되는 별이 9,083 -> 339개로 줄고 띠 밝기는 14%만 떨어진다.
+//   textureLod가 아니라 편향을 쓰는 이유는 화면 축소에 따른 자동 밉 선택을 남기기 위해서다.
+#define SKY_BAND_SCALE  3.087
+#define SKY_BAND_LOD    2.0
+
+// 탈채도 0.7: 띠의 평균색이 (0.0195, 0.0250, 0.0368)로 푸른 쪽에 치우쳐 있다.
+// 실제 은하수는 눈의 색각 문턱보다 어두워 회백색으로 보인다. 완전히 빼면 죽은 회색이라
+// 살짝 남긴다.
+#define SKY_BAND_DESAT  0.7
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outBrightColor; 
@@ -354,20 +393,47 @@ void main() {
         return;
     }
     else if (fragObjectType == 3) { 
-        vec3 rawSky = texture(skyboxTex, fragTexCube).rgb;
-        
-        // 🚀 [진짜 해결책] 감마 보정(Gamma Correction) 강제 적용
-        // 날것의 EXR 데이터에 2.2 제곱을 가해, 중간톤의 탁한 자주색을 확 가라앉히고 우주의 깊고 어두운 심연(블랙)을 복구합니다.
-        vec3 darkSky = pow(rawSky, vec3(2.5)); 
-        
-        // 전체적인 밝기가 여전히 높다면, 여기서 수치를 곱해 노출을 낮출 수 있습니다. (예: 0.5)
-        darkSky *= 2.0; 
-        
+        // 축척 보간값. 0 = 기본 축척, 1 = 실제 축척. main.cpp가 customData로 넘긴다.
+        float t = clamp(push.customData, 0.0, 1.0);
+
+        vec3 stars = max(texture(skyboxTex, fragTexCube).rgb, 0.0);
+        // 은하수 층은 실제 축척으로 갈수록 낮은 밉에서 읽는다. 어두운 별이 확산광으로
+        // 뭉개져, 맨눈에 은하수가 보이는 방식과 같아진다(위 SKY_BAND_LOD 주석 참조).
+        vec3 band = max(texture(skyBandTex, fragTexCube, SKY_BAND_LOD * t).rgb, 0.0);
+        // max로 0에서 자르는 이유: 큐브맵을 구울 때 쓴 란초시 보간에 음의 곁잎이 있어
+        // 밝은 별 둘레에 음수가 남을 수 있는데, pow(음수, 비정수)는 GLSL에서 정의되지 않는다.
+
+        // ── 하늘의 두 모습 ──────────────────────────────────────────────────
+        // 기본 축척(t=0)은 장노출 사진 같은 하늘이다. hiptyc + milkyway = starmap 이므로
+        // 양쪽에 같은 8.0을 곱하면 통합본을 쓰던 예전 출력이 그대로 재현된다.
+        //
+        // 실제 축척(t=1)은 맨눈으로 본 하늘이다. 상수는 측정으로 정했다 —
+        // 별 개수가 전천 9,100개(대기 없는 우주의 맨눈 한계 6.5등급)가 되는 원시값 문턱을
+        // 이분법으로 찾고, 그 문턱이 화면 가시 문턱에 걸리도록 감마와 배율을 맞췄다.
+        //
+        // 층을 나눈 이유가 여기 있다. 통합본에 하나의 곡선만 걸면 별 개수를 맞추는 순간
+        // 은하수가 사라진다(띠의 원시값 0.044 < 6.5등급 별의 문턱 0.261). 실제로는 둘 다
+        // 보이는데, 띠는 넓어서 눈이 공간적으로 적분해 인지하기 때문이다. 픽셀 하나만 보는
+        // 톤 곡선으로는 표현할 수 없는 차이라, 층을 갈라 각자 다른 곡선을 건다.
+        float g  = mix(1.0, SKY_STAR_GAMMA, t);
+        float k1 = mix(8.0, SKY_STAR_SCALE, t);
+        float k2 = mix(8.0, SKY_BAND_SCALE, t);
+
+        vec3 darkSky = pow(stars, vec3(g)) * k1;
+
+        // 은하수는 실제 축척에서 회색 쪽으로 뺀다. 갈색은 장노출 사진의 색이고,
+        // 실제로는 눈의 색각 문턱보다 어두워 회백색으로 보인다.
+        float bandLuma = dot(band, vec3(0.2126, 0.7152, 0.0722));
+        darkSky += mix(band, vec3(bandLuma), SKY_BAND_DESAT * t) * k2;
+
         float brightness = dot(darkSky, vec3(0.299, 0.587, 0.114));
         float starSeed = fract((darkSky.r * 123.456) + (darkSky.g * 789.012) + (darkSky.b * 345.678) + (fragTexCube.x * 12.34));
         float twinkle = sin(ubo.time * (1.0 + starSeed * 2.0) + starSeed * 100.0) * 0.5 + 0.5;
-        float starMask = smoothstep(0.35, 0.8, brightness);
-        
+        // 반짝임은 지구 대기의 굴절로 생기는 현상이라 우주에는 없다(ISS 영상의 별이
+        // 미동도 없는 이유). 실제 축척으로 갈수록 뺀다.
+        // 문턱은 새 분포에 맞춘 값이다. 예전 0.35는 은하수 띠까지 '별'로 잡아 띠가 깜빡였다.
+        float starMask = smoothstep(1.0, 4.0, brightness) * (1.0 - t);
+
         writeOut(vec4(darkSky * mix(1.0, 0.4 + twinkle * 1.2, starMask), 1.0));
         return;
     }

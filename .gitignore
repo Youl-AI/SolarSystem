@@ -13,5 +13,7 @@
 *.suo
 
 # 런타임 생성물 (유저별 그래픽 설정)
-settings.ini.worktrees/
 settings.ini
+
+# 직접 만든 작업 트리 (하네스가 만드는 .claude/worktrees/ 와는 별개)
+.worktrees/

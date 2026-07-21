@@ -113,6 +113,9 @@ struct GraphicsSettings {
     bool  fullscreen      = false;
     bool  orbitLines      = false;
     bool  realScale       = false;
+    // 하늘의 사실성. 축척과는 별개의 축이라 따로 둔다 — 압축 축척으로 태양계를 보면서도
+    // 맨눈에 실제로 보이는 별하늘을 볼 수 있어야 한다.
+    bool  realStars       = false;
     bool  asteroids       = true;   // 끄면 소행성대/카이퍼벨트를 통째로 건너뛴다
 };
 
@@ -184,6 +187,8 @@ private:
     std::vector<uint32_t> indices;
 
     bool isRealScaleMode = false;
+    // 하늘 전환의 진행도(0 = 사진 같은 하늘, 1 = 맨눈으로 본 하늘). settings.realStars를 향해 전진한다.
+    float starsLerp = 0.0f;
     GraphicsSettings settings;
     bool showOrbits = false; // 디폴트는 OFF
     float scaleLerp = 0.0f;  // 0.0(시각 비율) ~ 1.0(리얼 비율) 사이를 스르륵 오가는 타이머
@@ -245,9 +250,13 @@ private:
     Planet asteroidTypes[4];
 
     VkSampler textureSampler;
-    VkImage texSkybox, texDummyBlack, texDummyFlatNormal;
-    VkDeviceMemory memSkybox, memDummyBlack, memDummyFlatNormal;
-    VkImageView viewSkybox, viewDummyBlack, viewDummyFlatNormal;
+    VkImage texSkybox = VK_NULL_HANDLE, texDummyBlack, texDummyFlatNormal;
+    VkDeviceMemory memSkybox = VK_NULL_HANDLE, memDummyBlack, memDummyFlatNormal;
+    VkImageView viewSkybox = VK_NULL_HANDLE, viewDummyBlack, viewDummyFlatNormal;
+    // 은하수 확산광 층. EXR로 물러났을 때는 만들어지지 않고, 셰이더에는 검은 더미가 간다.
+    VkImage texSkyBand = VK_NULL_HANDLE;
+    VkDeviceMemory memSkyBand = VK_NULL_HANDLE;
+    VkImageView viewSkyBand = VK_NULL_HANDLE;
 
     Planet sun, moon, saturnRing, milkyWay;
     uint32_t galaxyIndexCount = 0, galaxyFirstIndex = 0;
@@ -687,7 +696,7 @@ protected:
                 else if (k == "showFps")         settings.showFps = (std::stoi(v) != 0);
                 else if (k == "showGpuTimes")    settings.showGpuTimes = (std::stoi(v) != 0);
                 else if (k == "fullscreen")      settings.fullscreen = (std::stoi(v) != 0);
-                // orbitLines / realScale은 의도적으로 복원하지 않는다: 매 실행 항상 OFF로 시작하는
+                // orbitLines / realScale / realStars는 의도적으로 복원하지 않는다: 매 실행 항상 OFF로 시작하는
                 // 런타임 뷰 토글이다. (구버전 settings.ini에 남아 있어도 무시)
             } catch (...) { /* 잘못된 값은 무시하고 기본값 유지 */ }
         }
@@ -706,17 +715,19 @@ protected:
           << "showFps="         << (settings.showFps ? 1 : 0) << "\n"
           << "showGpuTimes="    << (settings.showGpuTimes ? 1 : 0) << "\n"
           << "fullscreen="      << (settings.fullscreen ? 1 : 0) << "\n";
-        // orbitLines / realScale은 저장하지 않는다 — 항상 OFF로 시작하는 런타임 전용 뷰 토글.
+        // orbitLines / realScale / realStars는 저장하지 않는다 — 항상 OFF로 시작하는 런타임 전용 뷰 토글.
     }
 
-    // ── 성능 계측 ────────────────────────────────────────────────────────
-    // 타임스탬프는 항상 찍는다. 프레임당 11번 쓰는 비용은 측정 노이즈에도 못 미치고,
-    // 항상 켜 두어야 설정 창의 토글이 재시작 없이 바로 동작한다.
-    // SOLAR_PROFILE=1을 주면 120프레임마다 콘솔에도 요약을 찍는다(스크립트로 A/B 할 때 쓴다).
+    // ── 성능 계측 (개발자 전용) ──────────────────────────────────────────
+    // SOLAR_PROFILE=1 환경변수를 주고 실행할 때만 켜진다. 배포판을 그냥 실행하면
+    // 타임스탬프도 안 찍고 설정 창에 항목도 나오지 않는다 — 최종 사용자에게 보여 줄
+    // 정보가 아니고, 오히려 해석을 틀리기 쉬운 숫자다(%는 다른 패스가 싸져도 오른다).
+    //
+    // 개발 중에는 scripts/run_dev.bat으로 실행하면 된다.
     VkQueryPool tsPool = VK_NULL_HANDLE;
     float tsPeriodNs = 0.0f;
-    bool profiling = false;       // 타임스탬프 기록 여부 (= 장치가 지원하고 풀이 만들어졌는가)
-    bool profileConsole = false;  // 콘솔 출력 여부
+    bool devTools = false;        // SOLAR_PROFILE=1 인가 (계측 UI와 콘솔 출력의 관문)
+    bool profiling = false;       // 타임스탬프 기록 여부 (= devTools이고 장치가 지원하는가)
     int tsFrameCount = 0;
     double tsAccumCpuRecord = 0.0, tsAccumCpuFrame = 0.0, tsLastFrameStart = 0.0;
     double tsAccumGpu[10] = {};
@@ -730,7 +741,9 @@ protected:
 
     void initProfiling() {
         const char* env = std::getenv("SOLAR_PROFILE");
-        profileConsole = (env && env[0] == '1');
+        devTools = (env && env[0] == '1');
+        if (!devTools) return;      // 배포 실행에서는 쿼리 풀조차 만들지 않는다
+
         VkPhysicalDeviceProperties props{}; vkGetPhysicalDeviceProperties(physicalDevice, &props);
         // 타임스탬프를 못 쓰는 큐가 있는 장치에서는 계측을 통째로 끈다.
         if (props.limits.timestampPeriod == 0.0f || props.limits.timestampComputeAndGraphics == VK_FALSE) {
@@ -742,7 +755,7 @@ protected:
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = TS_SLOTS;
         if (vkCreateQueryPool(device, &qi, nullptr, &tsPool) != VK_SUCCESS) return;
         profiling = true;
-        if (profileConsole) std::cout << "[profile] on. timestampPeriod=" << tsPeriodNs << " ns/tick\n";
+        std::cout << "[profile] on. timestampPeriod=" << tsPeriodNs << " ns/tick\n";
     }
 
     // 직전 프레임의 타임스탬프를 읽어 누적한다(펜스 대기 후라 이미 준비돼 있다).
@@ -760,7 +773,7 @@ protected:
             tsSmoothGpu[i] += (ms - tsSmoothGpu[i]) * 0.05;
         }
 
-        if (profileConsole && tsFrameCount % 120 == 0) {
+        if (devTools && tsFrameCount % 120 == 0) {
             double n = 120.0;
             const char* const* names = TS_NAMES;
             std::cout << "[profile] frames=" << tsFrameCount
@@ -1643,9 +1656,14 @@ protected:
         static bool isSimInit = false;
         if (!isSimInit) { simulationTime = time * 0.5f; isSimInit = true; } // 첫 프레임 동기화
 
-        if (isRealScaleMode) scaleLerp += deltaTime * 0.5f; 
-        else scaleLerp -= deltaTime * 0.5f; 
+        if (isRealScaleMode) scaleLerp += deltaTime * 0.5f;
+        else scaleLerp -= deltaTime * 0.5f;
         scaleLerp = std::clamp(scaleLerp, 0.0f, 1.0f);
+
+        // 하늘도 같은 방식으로 서서히 넘긴다. 한 프레임에 바꾸면 별이 우수수 사라져 튄다.
+        // 축척보다 조금 느리게(0.4) 가야 별이 하나씩 꺼지는 느낌이 난다.
+        starsLerp += (settings.realStars ? 1.0f : -1.0f) * deltaTime * 0.4f;
+        starsLerp = std::clamp(starsLerp, 0.0f, 1.0f);
         
         // 자연스럽게 출발하고 도착하는 Smoothstep 곡선 공식 적용
         float easeScale = scaleLerp * scaleLerp * (3.0f - 2.0f * scaleLerp);
@@ -1885,7 +1903,7 @@ protected:
 
         // 여기는 펜스 대기 뒤라 직전 프레임의 컴퓨트 결과가 확정돼 있다. 0으로 리셋하기
         // 직전에 스냅샷을 떠 둔다(onFrameStart에서 읽으면 아직 GPU가 채우기 전이라 0이 나온다).
-        if (profiling && indirectDrawMapped)
+        if (profiling && indirectDrawMapped)   // 오버레이의 LOD 표시도 이 스냅샷을 쓴다
             memcpy(lastDrawCmds, indirectDrawMapped, 12 * sizeof(VkDrawIndexedIndirectCommand));
 
         memcpy(indirectDrawMapped, drawCmdTemplates, 12 * sizeof(VkDrawIndexedIndirectCommand));
@@ -1950,12 +1968,38 @@ protected:
             ImGui::Begin("GPU Times", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize);
             double total = 0.0;
             for (int i = 0; i < 10; ++i) total += tsSmoothGpu[i];
-            ImGui::Text("GPU %.2f ms  (%.0f FPS 상한)", total, total > 0.0 ? 1000.0 / total : 0.0);
+            // 라벨은 반드시 ASCII로 쓴다. ImGui 기본 폰트에는 한글 글리프가 없어 전부 '?'가 된다.
+            ImGui::Text("GPU %.2f ms  (max %.0f FPS)", total, total > 0.0 ? 1000.0 / total : 0.0);
             ImGui::Separator();
             for (int i = 0; i < 10; ++i) {
                 if (tsSmoothGpu[i] < 0.005) continue;   // 눈금 이하인 패스는 줄만 차지한다
                 ImGui::Text("%-12s %5.2f ms  %4.1f%%", TS_NAMES[i], tsSmoothGpu[i],
                             total > 0.0 ? tsSmoothGpu[i] / total * 100.0 : 0.0);
+            }
+
+            // 소행성이 비싸 보일 때 개수 탓인지 LOD 탓인지 가르려면 이 줄이 필요하다.
+            // 콘솔에만 찍히고 있었는데, 창으로 실행하면 콘솔이 없어 볼 방법이 없었다.
+            uint32_t perLod[3] = {}, tris = 0;
+            for (int lod = 0; lod < 3; ++lod)
+                for (int type = 0; type < 4; ++type) {
+                    const auto &c = lastDrawCmds[lod * 4 + type];
+                    perLod[lod] += c.instanceCount;
+                    tris += c.instanceCount * (c.indexCount / 3);
+                }
+            ImGui::Separator();
+            ImGui::Text("asteroids drawn %u / %zu", perLod[0] + perLod[1] + perLod[2], asteroidTransforms.size());
+            ImGui::Text("  LOD  high %u   mid %u   low %u", perLod[0], perLod[1], perLod[2]);
+            ImGui::Text("  triangles %.2f M", tris / 1.0e6);
+
+            // MSAA 렌더 타겟은 샘플 수에 정비례해 커진다. 8x에서는 색상/bright/깊이가
+            // 합쳐서 수백 MiB인데, 프레임 시간에는 거의 안 잡혀서 눈치채기 어렵다.
+            {
+                double px = (double)renderExtent.width * renderExtent.height;
+                int s = (int)msaaSamples;
+                double msaaMiB = px * s * (8.0 + 8.0 + 4.0) / 1048576.0;   // 색상 + bright + 깊이(D32)
+                ImGui::Separator();
+                ImGui::Text("render %ux%u  MSAA %dx  targets %.0f MiB",
+                            renderExtent.width, renderExtent.height, s, msaaMiB);
             }
             ImGui::End();
         }
@@ -2121,6 +2165,17 @@ protected:
         ImGui::Render();
     }
 
+    // 직전 위젯에 설명을 붙인다.
+    //
+    // 라벨과 마찬가지로 영문으로만 쓴다 — ImGui 기본 폰트에 한글 글리프가 없어
+    // 한글을 넣으면 전부 '?'로 나온다.
+    // AllowWhenDisabled를 주는 이유: VIEW 항목들은 로비에서 비활성인데, 그때야말로
+    // "이게 뭐 하는 건지" 궁금해서 마우스를 올려 보게 된다.
+    static void helpTip(const char *text) {
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", text);
+    }
+
     void drawSettingsWindow() {
         // 설정 창은 해상도가 바뀌어도 항상 화면 중앙에 고정한다(같은 상대 위치 + 잘림 방지).
         // 크기는 고정: 내용이 고정된 컨트롤 목록이라 해상도에 맞춰 키우면 여백만 늘어 비어 보인다.
@@ -2149,24 +2204,53 @@ protected:
                     settings.resolutionIndex = displayIdx;
                 }
             }
+            helpTip("Window size. 'Fullscreen' always renders at the monitor's\n"
+                    "native resolution, so the size list does not apply there.\n"
+                    "To render fewer pixels without shrinking the window, use\n"
+                    "Render Scale below instead.");
 
             const char* scaleLabels[] = {"0.5x", "0.75x", "1.0x", "1.5x", "2.0x"};
             static const float scaleVals[] = {0.5f, 0.75f, 1.0f, 1.5f, 2.0f};
             int scaleIdx = 2; for (int i = 0; i < 5; ++i) if (scaleVals[i] == settings.renderScale) scaleIdx = i;
             if (ImGui::Combo("Render Scale", &scaleIdx, scaleLabels, 5)) settings.renderScale = scaleVals[scaleIdx];
+            helpTip("Renders at this multiple of the window size, then resamples\n"
+                    "to fit. Cost scales with the square: 2.0x draws 4x the pixels.\n"
+                    "\n"
+                    "Above 1.0x this is supersampling - it cleans up everything,\n"
+                    "including texture and shader detail that MSAA cannot touch.\n"
+                    "Below 1.0x it is the cheapest way to gain frame rate.");
 
             const char* msaaLabels[] = {"Off", "2x", "4x", "8x"};
             static const int msaaVals[] = {0, 2, 4, 8};
             int msaaIdx = 3; for (int i = 0; i < 4; ++i) if (msaaVals[i] == settings.msaaLevel) msaaIdx = i;
             if (ImGui::Combo("Anti-aliasing", &msaaIdx, msaaLabels, 4)) settings.msaaLevel = msaaVals[msaaIdx];
+            helpTip("Multisampling. Smooths geometry edges - planet limbs and\n"
+                    "orbit lines - but not texture or shader detail.\n"
+                    "\n"
+                    "Costs little frame time here, but the render targets grow in\n"
+                    "direct proportion to the sample count. At 3200x1800 they take\n"
+                    "879 MiB at 8x versus 220 MiB at 2x. Lower this first if you\n"
+                    "ever run short of video memory.");
 
             int vsyncIdx = settings.vsync ? 0 : 1;
             const char* vsyncLabels[] = {"On", "Off"};
             if (ImGui::Combo("VSync", &vsyncIdx, vsyncLabels, 2)) settings.vsync = (vsyncIdx == 0);
+            helpTip("On: waits for the monitor to refresh before presenting, so\n"
+                    "the image never tears. Caps the frame rate at the refresh rate.\n"
+                    "Off: presents as soon as a frame is ready. Higher frame rate,\n"
+                    "but a frame can be swapped mid-scan and show a torn seam.");
         }
 
         ImGui::SliderFloat("Field of View", &settings.fovDegrees, 30.0f, 90.0f, "%.0f deg");
+        helpTip("Vertical viewing angle. Wider fits more in but stretches the\n"
+                "edges; narrower feels like a telephoto lens.\n"
+                "This is the resting value - the scroll wheel zooms in from here,\n"
+                "down to 2 degrees.");
+
         ImGui::SliderFloat("Brightness",    &settings.exposure,   0.3f, 3.0f, "%.2f");
+        helpTip("Exposure multiplier applied before tone mapping, like the\n"
+                "exposure dial on a camera. Raise it to lift dim detail out of\n"
+                "shadow; the brightest highlights stay white either way.");
 
         {
             const char* capLabels[] = {"Unlimited", "30", "60", "120", "144"};
@@ -2174,19 +2258,61 @@ protected:
             int capIdx = 0; for (int i = 0; i < 5; ++i) if (capVals[i] == settings.frameCap) capIdx = i;
             if (ImGui::Combo("Frame Cap", &capIdx, capLabels, 5)) settings.frameCap = capVals[capIdx];
         }
+        helpTip("Holds the frame rate at a target by sleeping between frames.\n"
+                "Useful for keeping the GPU quiet and cool when the scene is\n"
+                "running far faster than the display can show.");
+
         ImGui::Checkbox("Show FPS", &settings.showFps);
-        if (!profiling) ImGui::BeginDisabled();
-        ImGui::Checkbox("Show GPU Times", &settings.showGpuTimes);
-        if (!profiling) ImGui::EndDisabled();
-        if (!profiling && ImGui::IsItemHovered())
-            ImGui::SetTooltip("이 GPU는 타임스탬프 쿼리를 지원하지 않습니다.");
+        helpTip("Frame rate counter in the top-left corner.");
+
+        // 계측 항목은 개발자 세션에서만 보인다(SOLAR_PROFILE=1). 배포 실행에서는
+        // 항목 자체가 없다 — 최종 사용자에게 필요한 정보가 아니고, 잘못 읽기도 쉽다.
+        if (devTools) {
+            if (!profiling) ImGui::BeginDisabled();
+            ImGui::Checkbox("Show GPU Times", &settings.showGpuTimes);
+            if (!profiling) ImGui::EndDisabled();
+            helpTip(profiling
+                    ? "Per-pass GPU timings in the bottom-left corner, so you can see\n"
+                      "which pass a frame is actually spent in rather than guessing.\n"
+                      "Also reports how many asteroids are drawn at each level of\n"
+                      "detail, and how much memory the render targets occupy.\n"
+                      "\n"
+                      "Read the milliseconds, not the percentages - a pass can reach\n"
+                      "a large share simply because the others got cheaper."
+                    : "This GPU does not support timestamp queries.");
+        }
 
         ImGui::SeparatorText("VIEW");
         bool inSim = (currentAppState == AppState::SIMULATION);
         if (!inSim) ImGui::BeginDisabled();
+
         ImGui::Checkbox("Orbit Lines", &settings.orbitLines);
+        helpTip("Draws each body's orbital ellipse, tilted and oriented to its\n"
+                "real inclination and ascending node.");
+
         ImGui::Checkbox("Asteroids", &settings.asteroids);
+        helpTip("Draws the main belt and the Kuiper belt - 12,400 bodies whose\n"
+                "orbits are sampled from the real populations. Turning this off\n"
+                "skips them entirely, though they are cheap: even with every one\n"
+                "on screen they cost well under a millisecond.");
+
         ImGui::Checkbox("Real Scale", &settings.realScale);
+        helpTip("Moves every body to its true distance and size instead of the\n"
+                "compressed layout, at 1 AU = 500 units.\n"
+                "\n"
+                "The solar system is mostly empty, so expect the planets to\n"
+                "become specks scattered across a great deal of nothing. That\n"
+                "emptiness is the point.");
+
+        ImGui::Checkbox("Real Stars", &settings.realStars);
+        helpTip("Show the sky as the naked eye would see it from space:\n"
+                "about 9,100 stars (magnitude 6.5), a faint grey Milky Way,\n"
+                "and no twinkling - starlight only shimmers when it passes\n"
+                "through air, so in vacuum the stars sit perfectly still.\n"
+                "\n"
+                "Off is the long-exposure photograph look: millions of stars\n"
+                "and a bright, colourful Milky Way. Independent of Real Scale.");
+
         if (!inSim) ImGui::EndDisabled();
 
         ImGui::Spacing();
@@ -2325,7 +2451,22 @@ protected:
         }
         
         tsMark(cb, 3); // 천체 본체 끝 (다음은 스카이박스)
-        drawObject(sun, glm::rotate(glm::mat4(1.0f), currentAppTime * glm::radians(0.5f), glm::vec3(0.0f, 1.0f, 0.0f)), 3);
+        // 스카이박스는 태양의 디스크립터 세트를 빌려 쓴다(큐브맵은 어느 세트에나 같이 들어 있다).
+        // drawObject를 쓰지 않고 푸시 상수를 직접 만드는 이유: customData에 하늘 전환값을
+        // 실어야 하기 때문이다. 타입 3 분기는 customData를 달리 쓰지 않으므로 자리가 비어 있다.
+        // 이 값으로 셰이더가 '사진 같은 하늘'과 '맨눈으로 본 하늘' 사이를 오간다.
+        //
+        // 축척(easeScale)이 아니라 별도의 Real Stars 토글을 쓴다. 하늘의 사실성과 거리
+        // 축척은 서로 다른 축이라, 압축 축척으로 태양계 전체를 보면서도 실제 별하늘을
+        // 볼 수 있어야 한다.
+        {
+            float easeStars = starsLerp * starsLerp * (3.0f - 2.0f * starsLerp);
+            glm::mat4 skyMat = glm::rotate(glm::mat4(1.0f), currentAppTime * glm::radians(0.5f), glm::vec3(0.0f, 1.0f, 0.0f));
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sun.descriptorSet, 0, nullptr);
+            PushConstants skyPush{skyMat, 3, easeStars};
+            vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &skyPush);
+            vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0);
+        }
         
         tsMark(cb, 4); // 행성/스카이박스 끝
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &milkyWay.descriptorSet, 0, nullptr);
@@ -2533,6 +2674,9 @@ protected:
         if (tsPool != VK_NULL_HANDLE) { vkDestroyQueryPool(device, tsPool, nullptr); tsPool = VK_NULL_HANDLE; }
 
         vkDestroyImageView(device, viewSkybox, nullptr); vkDestroyImage(device, texSkybox, nullptr); vkFreeMemory(device, memSkybox, nullptr);
+        if (viewSkyBand != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, viewSkyBand, nullptr); vkDestroyImage(device, texSkyBand, nullptr); vkFreeMemory(device, memSkyBand, nullptr);
+        }
         vkDestroyImageView(device, viewDummyBlack, nullptr); vkDestroyImage(device, texDummyBlack, nullptr); vkFreeMemory(device, memDummyBlack, nullptr);
         vkDestroyImageView(device, viewDummyFlatNormal, nullptr); vkDestroyImage(device, texDummyFlatNormal, nullptr); vkFreeMemory(device, memDummyFlatNormal, nullptr);
         vkDestroyBuffer(device, indexBuffer, nullptr); vkFreeMemory(device, indexBufferMemory, nullptr);
@@ -2739,22 +2883,26 @@ private:
         auto mkImgInfo = [&](VkImageView v) { VkDescriptorImageInfo i{}; i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; i.imageView = v; i.sampler = textureSampler; return i; };
         
         VkDescriptorImageInfo iDiff = mkImgInfo(p.viewDiffuse), iNight = mkImgInfo(p.viewNight), iSpec = mkImgInfo(p.viewSpecular), iNorm = mkImgInfo(p.viewNormal), iCloud = mkImgInfo(p.viewClouds), iSky = mkImgInfo(viewSkybox);
+        // 은하수 층이 없으면(EXR 스카이박스로 물러난 경우) 검은 더미를 넣는다.
+        // 셰이더는 이 층을 더하기만 하므로 0이면 예전과 같은 결과가 나온다.
+        VkDescriptorImageInfo iBand = mkImgInfo(viewSkyBand != VK_NULL_HANDLE ? viewSkyBand : viewDummyBlack);
 
         VkDescriptorBufferInfo ssboInfo{}; ssboInfo.buffer = computeOutputBuffer; ssboInfo.offset = 0; ssboInfo.range = VK_WHOLE_SIZE;
 
-        std::array<VkWriteDescriptorSet, 8> writes{}; 
-        for (int i = 0; i < 8; i++) { writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet = p.descriptorSet; writes[i].dstBinding = i; writes[i].descriptorCount = 1; }
+        std::array<VkWriteDescriptorSet, 9> writes{};
+        for (int i = 0; i < 9; i++) { writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet = p.descriptorSet; writes[i].dstBinding = i; writes[i].descriptorCount = 1; }
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; writes[0].pBufferInfo = &bInfo;
         for (int i = 1; i < 7; i++) writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[1].pImageInfo = &iDiff; writes[2].pImageInfo = &iNight; writes[3].pImageInfo = &iSpec; writes[4].pImageInfo = &iNorm; writes[5].pImageInfo = &iCloud; writes[6].pImageInfo = &iSky;
         writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[7].pBufferInfo = &ssboInfo;
+        writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[8].pImageInfo = &iBand;
 
-        vkUpdateDescriptorSets(device, 8, writes.data(), 0, nullptr); return p;
+        vkUpdateDescriptorSets(device, 9, writes.data(), 0, nullptr); return p;
     }
 
     void createDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 8> b{}; // 0=UBO, 1~6=텍스처, 7=소행성 SSBO
-        for (int i = 0; i < 8; i++) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; }
+        std::array<VkDescriptorSetLayoutBinding, 9> b{}; // 0=UBO, 1~6=텍스처, 7=소행성 SSBO, 8=은하수 층
+        for (int i = 0; i < 9; i++) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; }
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; b[0].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
         for (int i = 1; i < 7; i++) b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         b[4].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
@@ -2764,7 +2912,10 @@ private:
         b[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         b[7].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
-        VkDescriptorSetLayoutCreateInfo layoutInfo{}; layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layoutInfo.bindingCount = 8; layoutInfo.pBindings = b.data();
+        // 8번: 은하수 확산광 큐브맵. 밝은 별(6번)과 따로 둬야 둘을 독립적으로 조절할 수 있다.
+        b[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{}; layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layoutInfo.bindingCount = 9; layoutInfo.pBindings = b.data();
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
     }
 
@@ -2841,7 +2992,111 @@ private:
             indices.push_back(0); indices.push_back(i); indices.push_back(i + 1);
         }
     }
+    // BC6H로 미리 구운 큐브맵 DDS를 읽는다. 성공하면 true.
+    //
+    // BC6H는 HDR 전용 블록 압축이라 half 4채널을 픽셀당 1바이트로 담는다. 이게 없으면
+    // 해상도 업그레이드가 성립하지 않는다 — 4096^2 x 6면을 fp16으로 올리면 805 MiB인데,
+    // BC6H로는 밉맵까지 다 넣고도 128 MiB다(2048^2 fp16 무압축 192 MiB보다도 작다).
+    bool loadCubeDDS(const std::string &path, VkImage &outImg, VkDeviceMemory &outMem, VkImageView &outView) {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return false;
+        std::vector<uint8_t> buf(static_cast<size_t>(f.tellg()));
+        f.seekg(0); f.read(reinterpret_cast<char *>(buf.data()), buf.size());
+        if (buf.size() < 148 || memcmp(buf.data(), "DDS ", 4) != 0) return false;
+
+        auto u32 = [&](size_t o) { uint32_t v; memcpy(&v, buf.data() + o, 4); return v; };
+        uint32_t height = u32(12), width = u32(16), mips = u32(28);
+        if (memcmp(buf.data() + 84, "DX10", 4) != 0) return false;
+        uint32_t dxgi = u32(128), misc = u32(136);
+        if (mips == 0) mips = 1;
+        if (!(misc & 0x4)) { std::cerr << "스카이박스 DDS가 큐브맵이 아닙니다: " << path << "\n"; return false; }
+
+        VkFormat format;
+        if (dxgi == 95)      format = VK_FORMAT_BC6H_UFLOAT_BLOCK;   // 95 = BC6H_UF16
+        else if (dxgi == 96) format = VK_FORMAT_BC6H_SFLOAT_BLOCK;   // 96 = BC6H_SF16
+        else { std::cerr << "스카이박스 DDS의 포맷을 모릅니다(dxgi=" << dxgi << ")\n"; return false; }
+
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
+        if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
+            std::cerr << "이 GPU는 BC6H를 지원하지 않습니다. EXR 스카이박스로 돌아갑니다.\n";
+            return false;
+        }
+
+        // DDS 큐브맵은 면이 바깥 루프다 — 면 0의 밉 전부, 면 1의 밉 전부, ... 순서로 놓인다.
+        const size_t dataOffset = 148;
+        std::vector<VkBufferImageCopy> regions;
+        size_t offset = dataOffset;
+        for (uint32_t face = 0; face < 6; ++face) {
+            for (uint32_t m = 0; m < mips; ++m) {
+                uint32_t w = std::max(1u, width >> m), h = std::max(1u, height >> m);
+                size_t bytes = static_cast<size_t>((w + 3) / 4) * ((h + 3) / 4) * 16;
+                if (offset + bytes > buf.size()) { std::cerr << "스카이박스 DDS가 잘렸습니다\n"; return false; }
+                VkBufferImageCopy r{};
+                r.bufferOffset = offset - dataOffset;
+                r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, m, face, 1};
+                r.imageExtent = {w, h, 1};
+                regions.push_back(r);
+                offset += bytes;
+            }
+        }
+
+        VkDeviceSize total = offset - dataOffset;
+        VkBuffer staging; VkDeviceMemory stagingMem;
+        createBuffer(total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     staging, stagingMem);
+        void *dst; vkMapMemory(device, stagingMem, 0, total, 0, &dst);
+        memcpy(dst, buf.data() + dataOffset, static_cast<size_t>(total));
+        vkUnmapMemory(device, stagingMem);
+
+        VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ii.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; ii.imageType = VK_IMAGE_TYPE_2D;
+        ii.extent = {width, height, 1}; ii.mipLevels = mips; ii.arrayLayers = 6;
+        ii.format = format; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCreateImage(device, &ii, nullptr, &outImg);
+        VkMemoryRequirements mr; vkGetImageMemoryRequirements(device, outImg, &mr);
+        VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = mr.size; ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkAllocateMemory(device, &ai, nullptr, &outMem); vkBindImageMemory(device, outImg, outMem, 0);
+
+        transitionImageLayout(outImg, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 6, mips);
+        VkCommandBuffer cb = beginSingleTimeCommands();
+        vkCmdCopyBufferToImage(cb, staging, outImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               static_cast<uint32_t>(regions.size()), regions.data());
+        endSingleTimeCommands(cb);
+        transitionImageLayout(outImg, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 6, mips);
+        vkDestroyBuffer(device, staging, nullptr); vkFreeMemory(device, stagingMem, nullptr);
+
+        outView = createImageView(outImg, format, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_CUBE, 6, mips);
+        std::cout << "[skybox] " << path << "  " << width << "x" << height
+                  << " x6, 밉 " << mips << ", " << (total / 1048576) << " MiB\n";
+        return true;
+    }
+
     void createCubeTextureImage() {
+        // 실측 성도(NASA Deep Star Maps 2020)를 두 층으로 나눠 구워 둔 것이 있으면 쓴다.
+        //
+        //   skybox_stars = hiptyc   : 히파르코스/티코의 밝은 별만
+        //   skybox_band  = milkyway : 은하수 확산광 + 어두운 Gaia 별 전부
+        //
+        // 나눠야 하는 이유: 별 개수를 실제 하늘(전천 9,100개, 6.5등급)에 맞추는 원시값
+        // 문턱이 0.261인데 은하수 띠는 0.044라, 하나의 톤 곡선으로는 별 개수를 맞추는
+        // 순간 은하수가 사라진다. 점광원과 확산광은 눈의 검출 문턱이 다른데(띠는 넓어서
+        // 공간적으로 적분돼 보인다), 픽셀 단위 함수로는 그 차이를 표현할 수 없다.
+        if (loadCubeDDS("textures/skybox_stars.dds", texSkybox, memSkybox, viewSkybox) &&
+            loadCubeDDS("textures/skybox_band.dds", texSkyBand, memSkyBand, viewSkyBand))
+            return;
+
+        // 한쪽만 성공했으면 되돌린다. 두 층이 짝으로 있어야 셰이더 계수가 맞는다.
+        if (viewSkybox != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, viewSkybox, nullptr); vkDestroyImage(device, texSkybox, nullptr); vkFreeMemory(device, memSkybox, nullptr);
+            viewSkybox = VK_NULL_HANDLE; texSkybox = VK_NULL_HANDLE; memSkybox = VK_NULL_HANDLE;
+        }
+
         // 🚀 확장자를 .exr로 설정합니다! (textures 폴더 안에 6장의 EXR 파일이 있어야 합니다)
         std::vector<std::string> cubeFaces = {
             "textures/right.exr", "textures/left.exr", 
@@ -2900,7 +3155,7 @@ private:
             for (VkDeviceSize p = 0; p < srcLayerFloats; p += 4) {
                 dst[0] = glm::packHalf2x16(glm::vec2(src[p + 0], src[p + 1]));
                 dst[1] = glm::packHalf2x16(glm::vec2(src[p + 2], src[p + 3]));
-                if (profileConsole) {   // 검증은 SOLAR_PROFILE=1일 때만 (2500만 픽셀을 한 번 더 훑는다)
+                if (devTools) {   // 검증은 SOLAR_PROFILE=1일 때만 (2500만 픽셀을 한 번 더 훑는다)
                     glm::vec2 rg = glm::unpackHalf2x16(dst[0]), ba = glm::unpackHalf2x16(dst[1]);
                     float back[4] = {rg.x, rg.y, ba.x, ba.y};
                     for (int c = 0; c < 4; ++c) {
@@ -2915,7 +3170,7 @@ private:
             // 🚀 tinyexr은 내부적으로 malloc을 쓰기 때문에 반드시 free()로 메모리를 해제해야 합니다.
             free(pixels[i]);
         }
-        if (profileConsole)
+        if (devTools)
             std::cout << "[skybox] fp16 변환 검증: 원본 최대값=" << maxOrig
                       << "  최대 절대오차=" << maxAbsErr
                       << "  값이 달라진 채널 수=" << nonZeroDiff
