@@ -1,6 +1,8 @@
 #include "VulkanBase.hpp"
 #include "Camera.hpp"
 
+#include <glm/gtc/packing.hpp>   // packHalf2x16: 스카이박스를 fp16으로 접어 올린다
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -107,6 +109,7 @@ struct GraphicsSettings {
     float exposure        = 1.0f;
     int   frameCap        = 0;   // 0 = unlimited
     bool  showFps         = false;
+    bool  showGpuTimes    = false;  // 패스별 GPU 시간 오버레이
     bool  fullscreen      = false;
     bool  orbitLines      = false;
     bool  realScale       = false;
@@ -682,6 +685,7 @@ protected:
                 else if (k == "exposure")        settings.exposure = std::clamp(std::stof(v), 0.3f, 3.0f);
                 else if (k == "frameCap")        settings.frameCap = std::max(0, std::stoi(v));
                 else if (k == "showFps")         settings.showFps = (std::stoi(v) != 0);
+                else if (k == "showGpuTimes")    settings.showGpuTimes = (std::stoi(v) != 0);
                 else if (k == "fullscreen")      settings.fullscreen = (std::stoi(v) != 0);
                 // orbitLines / realScale은 의도적으로 복원하지 않는다: 매 실행 항상 OFF로 시작하는
                 // 런타임 뷰 토글이다. (구버전 settings.ini에 남아 있어도 무시)
@@ -700,31 +704,45 @@ protected:
           << "exposure="        << settings.exposure        << "\n"
           << "frameCap="        << settings.frameCap        << "\n"
           << "showFps="         << (settings.showFps ? 1 : 0) << "\n"
+          << "showGpuTimes="    << (settings.showGpuTimes ? 1 : 0) << "\n"
           << "fullscreen="      << (settings.fullscreen ? 1 : 0) << "\n";
         // orbitLines / realScale은 저장하지 않는다 — 항상 OFF로 시작하는 런타임 전용 뷰 토글.
     }
 
-    // ── 성능 계측 (진단용) ────────────────────────────────────────────────
-    // SOLAR_PROFILE=1 환경변수를 주고 실행하면 패스별 GPU 시간과 CPU 시간을 콘솔에 찍는다.
+    // ── 성능 계측 ────────────────────────────────────────────────────────
+    // 타임스탬프는 항상 찍는다. 프레임당 11번 쓰는 비용은 측정 노이즈에도 못 미치고,
+    // 항상 켜 두어야 설정 창의 토글이 재시작 없이 바로 동작한다.
+    // SOLAR_PROFILE=1을 주면 120프레임마다 콘솔에도 요약을 찍는다(스크립트로 A/B 할 때 쓴다).
     VkQueryPool tsPool = VK_NULL_HANDLE;
     float tsPeriodNs = 0.0f;
-    bool profiling = false;
+    bool profiling = false;       // 타임스탬프 기록 여부 (= 장치가 지원하고 풀이 만들어졌는가)
+    bool profileConsole = false;  // 콘솔 출력 여부
     int tsFrameCount = 0;
     double tsAccumCpuRecord = 0.0, tsAccumCpuFrame = 0.0, tsLastFrameStart = 0.0;
     double tsAccumGpu[10] = {};
+    double tsSmoothGpu[10] = {};  // 오버레이용. 지수 평활이라 숫자가 떨리지 않는다.
     VkDrawIndexedIndirectCommand lastDrawCmds[12] = {}; // 직전 프레임의 LOD 바구니 스냅샷
     static const int TS_SLOTS = 11; // 0시작 1컴퓨트 2소행성 3행성 4은하 5궤도선 6태양 7블러 8포스트 9끝
+    static constexpr const char* TS_NAMES[10] = {
+        "compute", "asteroids", "bodies", "skybox", "galaxy+atmo",
+        "orbits", "sun", "blur", "post", "tail"
+    };
 
     void initProfiling() {
         const char* env = std::getenv("SOLAR_PROFILE");
-        profiling = (env && env[0] == '1');
-        if (!profiling) return;
+        profileConsole = (env && env[0] == '1');
         VkPhysicalDeviceProperties props{}; vkGetPhysicalDeviceProperties(physicalDevice, &props);
+        // 타임스탬프를 못 쓰는 큐가 있는 장치에서는 계측을 통째로 끈다.
+        if (props.limits.timestampPeriod == 0.0f || props.limits.timestampComputeAndGraphics == VK_FALSE) {
+            std::cout << "[profile] 이 장치는 타임스탬프 쿼리를 지원하지 않아 계측을 끕니다.\n";
+            return;
+        }
         tsPeriodNs = props.limits.timestampPeriod;
         VkQueryPoolCreateInfo qi{}; qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = TS_SLOTS;
-        vkCreateQueryPool(device, &qi, nullptr, &tsPool);
-        std::cout << "[profile] on. timestampPeriod=" << tsPeriodNs << " ns/tick\n";
+        if (vkCreateQueryPool(device, &qi, nullptr, &tsPool) != VK_SUCCESS) return;
+        profiling = true;
+        if (profileConsole) std::cout << "[profile] on. timestampPeriod=" << tsPeriodNs << " ns/tick\n";
     }
 
     // 직전 프레임의 타임스탬프를 읽어 누적한다(펜스 대기 후라 이미 준비돼 있다).
@@ -733,12 +751,18 @@ protected:
         uint64_t ts[TS_SLOTS] = {};
         if (vkGetQueryPoolResults(device, tsPool, 0, TS_SLOTS, sizeof(ts), ts, sizeof(uint64_t),
                                   VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
-        for (int i = 0; i < 11; ++i)
-            tsAccumGpu[i] += (double)(ts[i + 1] - ts[i]) * tsPeriodNs / 1e6; // ms
+        // 슬롯이 11개면 구간은 10개다. 예전엔 11번 돌아 tsAccumGpu[10](크기 10)과
+        // ts[11]을 넘겨 읽고 썼다.
+        for (int i = 0; i < 10; ++i) {
+            double ms = (double)(ts[i + 1] - ts[i]) * tsPeriodNs / 1e6;
+            tsAccumGpu[i] += ms;
+            // 오버레이는 매 프레임 갱신되므로 그대로 쓰면 숫자가 읽을 수 없게 떨린다.
+            tsSmoothGpu[i] += (ms - tsSmoothGpu[i]) * 0.05;
+        }
 
-        if (tsFrameCount % 120 == 0) {
+        if (profileConsole && tsFrameCount % 120 == 0) {
             double n = 120.0;
-            const char* names[10] = {"compute","ASTEROID","BODIES","SKYBOX","GALAXY+ATMO","orbits","SUN","blur","post","tail"};
+            const char* const* names = TS_NAMES;
             std::cout << "[profile] frames=" << tsFrameCount
                       << "  cpuFrame=" << (tsAccumCpuFrame / n) << "ms"
                       << "  cpuRecord=" << (tsAccumCpuRecord / n) << "ms  | GPU: ";
@@ -762,6 +786,10 @@ protected:
                           << " 합계=" << (tris[0] + tris[1] + tris[2]) << "\n";
             }
             std::cout << std::flush;
+        }
+        // 콘솔 출력 여부와 무관하게 120프레임마다 비운다. 예전엔 출력 블록 안에서만
+        // 비워서, 콘솔을 끄면 누적값이 영원히 자랐다.
+        if (tsFrameCount % 120 == 0) {
             for (int i = 0; i < 10; ++i) tsAccumGpu[i] = 0.0;
             tsAccumCpuRecord = tsAccumCpuFrame = 0.0;
         }
@@ -1911,6 +1939,27 @@ protected:
             ImGui::End();
         }
 
+        if (settings.showGpuTimes && profiling) {
+            // FPS만으로는 '느리다'는 것만 알 뿐 어디가 느린지 알 수 없다. 패스별로 나눠
+            // 보여줘야 MSAA, 소행성 수, 대기 셰이더 중 무엇을 손댈지 정할 수 있다.
+            //
+            // 좌하단에 둔다. 좌상단은 천체 정보 패널, 우상단은 기어, 우하단은 EXIT가 쓴다.
+            // 배경도 깔아 준다 — 별밭 위에 흰 글씨만 얹으면 읽을 수가 없다.
+            ImGui::SetNextWindowPos(ImVec2(10.0f, swapChainExtent.height - 10.0f), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+            ImGui::SetNextWindowBgAlpha(0.55f);
+            ImGui::Begin("GPU Times", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize);
+            double total = 0.0;
+            for (int i = 0; i < 10; ++i) total += tsSmoothGpu[i];
+            ImGui::Text("GPU %.2f ms  (%.0f FPS 상한)", total, total > 0.0 ? 1000.0 / total : 0.0);
+            ImGui::Separator();
+            for (int i = 0; i < 10; ++i) {
+                if (tsSmoothGpu[i] < 0.005) continue;   // 눈금 이하인 패스는 줄만 차지한다
+                ImGui::Text("%-12s %5.2f ms  %4.1f%%", TS_NAMES[i], tsSmoothGpu[i],
+                            total > 0.0 ? tsSmoothGpu[i] / total * 100.0 : 0.0);
+            }
+            ImGui::End();
+        }
+
         if (currentAppState == AppState::LOBBY) {
             // ---------------------------------------------------------
             // ① 대기 화면(LOBBY): 우주 시뮬레이션 스타일 HUD
@@ -2126,6 +2175,11 @@ protected:
             if (ImGui::Combo("Frame Cap", &capIdx, capLabels, 5)) settings.frameCap = capVals[capIdx];
         }
         ImGui::Checkbox("Show FPS", &settings.showFps);
+        if (!profiling) ImGui::BeginDisabled();
+        ImGui::Checkbox("Show GPU Times", &settings.showGpuTimes);
+        if (!profiling) ImGui::EndDisabled();
+        if (!profiling && ImGui::IsItemHovered())
+            ImGui::SetTooltip("이 GPU는 타임스탬프 쿼리를 지원하지 않습니다.");
 
         ImGui::SeparatorText("VIEW");
         bool inSim = (currentAppState == AppState::SIMULATION);
@@ -2476,6 +2530,8 @@ protected:
         vkDestroyImageView(device, msaaColorView, nullptr); vkDestroyImage(device, msaaColorImage, nullptr); vkFreeMemory(device, msaaColorMem, nullptr);
         vkDestroyImageView(device, msaaBrightView, nullptr); vkDestroyImage(device, msaaBrightImage, nullptr); vkFreeMemory(device, msaaBrightMem, nullptr);
 
+        if (tsPool != VK_NULL_HANDLE) { vkDestroyQueryPool(device, tsPool, nullptr); tsPool = VK_NULL_HANDLE; }
+
         vkDestroyImageView(device, viewSkybox, nullptr); vkDestroyImage(device, texSkybox, nullptr); vkFreeMemory(device, memSkybox, nullptr);
         vkDestroyImageView(device, viewDummyBlack, nullptr); vkDestroyImage(device, texDummyBlack, nullptr); vkFreeMemory(device, memDummyBlack, nullptr);
         vkDestroyImageView(device, viewDummyFlatNormal, nullptr); vkDestroyImage(device, texDummyFlatNormal, nullptr); vkFreeMemory(device, memDummyFlatNormal, nullptr);
@@ -2820,24 +2876,69 @@ private:
             }
         }
         
-        // 🚀 1픽셀당 4바이트(8비트)에서 16바이트(32비트 float * 4채널)로 용량 4배 확장
-        VkDeviceSize layerSize = static_cast<VkDeviceSize>(texWidth) * static_cast<VkDeviceSize>(texHeight) * 4ull * sizeof(float); 
-        VkDeviceSize imageSize = layerSize * 6; 
+        // GPU에는 half(fp16) 4채널로 올린다. EXR 원본의 채널 타입이 이미 HALF이므로
+        // fp32로 올리면 없는 정밀도를 채우려고 VRAM만 2배 쓴다(2048^2 x 6면 기준 402 MiB).
+        // tinyexr의 LoadEXR은 무조건 float로 풀어 주므로 여기서 다시 half로 접는다.
+        VkDeviceSize srcLayerFloats = static_cast<VkDeviceSize>(texWidth) * static_cast<VkDeviceSize>(texHeight) * 4ull;
+        VkDeviceSize layerSize = srcLayerFloats * sizeof(uint16_t);
+        VkDeviceSize imageSize = layerSize * 6;
         
         VkBuffer stagingBuffer; VkDeviceMemory stagingBufferMemory;
         createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
         void *data; 
         vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
         
-        for (int i = 0; i < 6; i++) { 
-            memcpy(static_cast<char *>(data) + (layerSize * i), pixels[i], static_cast<size_t>(layerSize)); 
+        // 진단: half로 접었다 편 값이 원본과 얼마나 다른지 잰다. EXR 원본의 채널 타입이
+        // HALF이므로 이론상 오차가 0이어야 하고, 0이 아니면 어딘가 잘못된 것이다.
+        double maxAbsErr = 0.0, maxOrig = 0.0; VkDeviceSize nonZeroDiff = 0;
+
+        for (int i = 0; i < 6; i++) {
+            // packHalf2x16은 float 두 개를 half 두 개로 접어 uint32 하나에 담는다.
+            // (r,g)와 (b,a)를 각각 한 번씩 접으면 픽셀당 16바이트가 8바이트가 된다.
+            uint32_t *dst = reinterpret_cast<uint32_t *>(static_cast<char *>(data) + layerSize * i);
+            const float *src = pixels[i];
+            for (VkDeviceSize p = 0; p < srcLayerFloats; p += 4) {
+                dst[0] = glm::packHalf2x16(glm::vec2(src[p + 0], src[p + 1]));
+                dst[1] = glm::packHalf2x16(glm::vec2(src[p + 2], src[p + 3]));
+                if (profileConsole) {   // 검증은 SOLAR_PROFILE=1일 때만 (2500만 픽셀을 한 번 더 훑는다)
+                    glm::vec2 rg = glm::unpackHalf2x16(dst[0]), ba = glm::unpackHalf2x16(dst[1]);
+                    float back[4] = {rg.x, rg.y, ba.x, ba.y};
+                    for (int c = 0; c < 4; ++c) {
+                        double d = std::fabs((double)back[c] - (double)src[p + c]);
+                        if (d > 0.0) ++nonZeroDiff;
+                        maxAbsErr = std::max(maxAbsErr, d);
+                        maxOrig = std::max(maxOrig, (double)src[p + c]);
+                    }
+                }
+                dst += 2;
+            }
             // 🚀 tinyexr은 내부적으로 malloc을 쓰기 때문에 반드시 free()로 메모리를 해제해야 합니다.
-            free(pixels[i]); 
+            free(pixels[i]);
         }
+        if (profileConsole)
+            std::cout << "[skybox] fp16 변환 검증: 원본 최대값=" << maxOrig
+                      << "  최대 절대오차=" << maxAbsErr
+                      << "  값이 달라진 채널 수=" << nonZeroDiff
+                      << " / " << (srcLayerFloats * 6) << std::endl;
         vkUnmapMemory(device, stagingBufferMemory);
         
         // 🚀 [핵심] Vulkan 이미지 포맷을 실수형(SFLOAT)으로 변경하여 빛의 다이나믹 레인지를 보존합니다.
-        VkFormat hdrFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
+        // R16G16B16A16_SFLOAT은 Vulkan이 SAMPLED_IMAGE와 선형 필터링을 필수로 보장하는
+        // 포맷이라 별도 지원 확인 없이 써도 된다.
+        VkFormat hdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+        // 진단: 예전에 쓰던 fp32가 이 장치에서 선형 필터링을 지원했는지 확인한다.
+        // 32비트 실수 포맷은 SAMPLED_IMAGE_FILTER_LINEAR이 필수가 아니라, 지원하지 않는
+        // 장치에서는 샘플러가 LINEAR로 설정돼 있어도 사실상 최근접으로 동작한다.
+        // 그러면 fp16으로 바꾼 순간 필터링이 '처음으로' 켜지면서 별 모양이 달라 보인다.
+        for (auto [fmt, name] : { std::pair<VkFormat, const char*>{VK_FORMAT_R32G32B32A32_SFLOAT, "R32G32B32A32_SFLOAT"},
+                                  {VK_FORMAT_R16G16B16A16_SFLOAT, "R16G16B16A16_SFLOAT"} }) {
+            VkFormatProperties fp{}; vkGetPhysicalDeviceFormatProperties(physicalDevice, fmt, &fp);
+            std::cout << "[skybox] " << name
+                      << "  sampled=" << ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ? 1 : 0)
+                      << "  linearFilter=" << ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ? 1 : 0)
+                      << "\n";
+        }
         
         VkImageCreateInfo imageInfo{}; imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; imageInfo.imageType = VK_IMAGE_TYPE_2D; imageInfo.extent.width = texWidth; imageInfo.extent.height = texHeight; imageInfo.extent.depth = 1; imageInfo.mipLevels = 1; imageInfo.arrayLayers = 6; 
         imageInfo.format = hdrFormat; // 새로운 HDR 포맷 적용

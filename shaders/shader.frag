@@ -30,6 +30,21 @@ float hash(vec3 p) { p = fract(p * vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.
 float noise3D(vec3 x) { vec3 p = floor(x); vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f); return mix(mix(mix(hash(p+vec3(0,0,0)),hash(p+vec3(1,0,0)),f.x),mix(hash(p+vec3(0,1,0)),hash(p+vec3(1,1,0)),f.x),f.y),mix(mix(hash(p+vec3(0,0,1)),hash(p+vec3(1,0,1)),f.x),mix(hash(p+vec3(0,1,1)),hash(p+vec3(1,1,1)),f.x),f.y),f.z); }
 float fbm(vec3 x) { float v = 0.0; float a = 0.5; vec3 shift = vec3(100.0); for(int i=0; i<4; ++i){ v+=a*noise3D(x); x=x*2.0+shift; a*=0.5; } return v; }
 
+// ── 태양 홍염(type 7)의 상한 유도 ──────────────────────────────────────────
+// noise3D는 [0,1]이고 fbm은 진폭 0.5+0.25+0.125+0.0625를 더하므로 fbm <= 0.9375다.
+// 홍염 반지름은 flameRadius = 1.01 + flamesShape * 0.15이고
+//   flamesShape = pow(chaoticNoise, 3) * 3 * (0.7 + 0.6 * fineDetail)
+//   chaoticNoise = n1*0.7 + n2*0.3   (n1, n2, fineDetail 모두 fbm)
+// 이 상한들을 대입하면 flameRadius <= 1.478이다. 그보다 바깥 픽셀은 알파가 정확히 0이다.
+//
+// 이 상한을 중간 단계에도 적용하면, 아직 안 구한 fbm에 최대값을 넣어 '이 픽셀은 무슨
+// 수를 써도 불꽃이 닿지 않는다'를 미리 판정할 수 있다. 판정이 보수적이라 화면은 그대로다.
+#define FBM_MAX      0.9375
+#define FINE_MAX     (0.7 + 0.6 * FBM_MAX)          // fineDetail 변조의 상한 = 1.2625
+#define FLAME_R(s)   (1.01 + (s) * 0.15)            // flamesShape -> flameRadius
+#define SHAPE(c)     (pow(c, 3.0) * 3.0 * FINE_MAX) // chaoticNoise -> flamesShape 상한
+#define FLAME_R_MAX  FLAME_R(SHAPE(FBM_MAX))        // = 1.478
+
 vec3 calculateNormal(vec2 uv, vec3 baseNormal) {
     // z는 저장하지 않고 복원한다. 노말맵은 구울 때 단위 벡터로 만들어 두었으므로
     // z = sqrt(1 - x^2 - y^2)가 정확히 성립한다. 덕분에 두 채널만 담는 BC5를 쓸 수 있고,
@@ -414,13 +429,16 @@ void main() {
         if (r < 0.95) discard;
 
         // 바깥쪽 조기 탈출. 홍염은 flames = smoothstep(flameRadius, 0.98, r)로 만들어지는데
-        // flameRadius는 아무리 커도 1.01 + 3.15*0.15 ≈ 1.48을 넘지 못한다(fbm 합의 상한).
+        // flameRadius는 아무리 커도 FLAME_R_MAX를 넘지 못한다(아래 상한 유도 참조).
         // 즉 r이 그보다 크면 alpha가 정확히 0이라 어차피 아래에서 discard되는 픽셀인데,
         // 그 전에 fbm을 6번(노이즈 24회) 계산하고 있었다. 돔 반지름이 2.5라 이 바깥 껍질이
-        // 돔 면적의 절반을 넘는다. 여유를 둬 1.6으로 자른다 — 화면상 변화는 없다.
+        // 돔 면적의 절반을 넘는다.
         // (이 한 줄이 태양 패스를 4.3ms -> 2.0ms로 줄였다. 돔 메시 자체를 줄이는 건
         //  여기서 이미 싸게 버려지므로 추가 이득이 없었다 — 측정으로 확인.)
-        if (r > 1.6) discard;
+        //
+        // 예전에는 여유를 둬 1.6으로 잘랐는데, 1.48~1.6 껍질은 알파가 반드시 0인데도
+        // fbm 6번을 다 계산하고 버려졌다. 이 껍질이 현재 셰이딩되는 면적의 22%다.
+        if (r > FLAME_R_MAX) discard;
 
         // 🚀 [핵심 2: 완벽한 곡면 Z-Depth 변조]
         // 카메라를 돌려도 깊이가 깨지지 않도록, 픽셀마다 구체 표면까지의 거리를 계산합니다.
@@ -454,9 +472,15 @@ void main() {
         ) * 2.5; 
         
         float n1 = fbm((volumePos + warpOffset) * 1.2 - flowOffset * 1.5);
+        // n1만 알아도 chaoticNoise의 상한은 정해진다(n2 <= FBM_MAX). 그 상한으로도
+        // 불꽃이 여기까지 못 오면 남은 fbm 두 번은 계산할 필요가 없다.
+        if (r > FLAME_R(SHAPE(n1 * 0.7 + FBM_MAX * 0.3))) discard;
+
         float n2 = fbm((volumePos + warpOffset) * 2.5 - flowOffset * 2.0);
         float chaoticNoise = (n1 * 0.7 + n2 * 0.3);
-        
+        // 같은 논리를 한 번 더. 이제 fineDetail만 남았다.
+        if (r > FLAME_R(SHAPE(chaoticNoise))) discard;
+
         // 가느다란 필라멘트 디테일: 더 높은 주파수 노이즈로 불꽃 가장자리를 잘게 쪼갠다.
         float fineDetail = fbm((volumePos + warpOffset) * 5.0 - flowOffset * 3.0);
 
