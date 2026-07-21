@@ -877,19 +877,19 @@ protected:
         planets.push_back(createPlanet("Eris", 1, 0.07f, 100.00f, 1.30f, 0.436f, 23.1f, 78.0f, 44.0f, 44.0f, 36.0f, 200.0f, 0.0f, false, "textures/asteroids/eris.jpg", "", "", "", "")); // index 12
 
         // 6. 목성 & 토성 위성 (목성계 안전 반경 내 공전)
-        Planet io = createPlanet("Io", 1, 0.09f, 1.2f, 40.0f, 0.004f, 40.0f, 0.0f, 0.04f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/moons/io.jpg", "", "", "", ""); 
+        Planet io = createPlanet("Io", 1, 0.09f, 1.2f, 40.0f, 0.004f, 40.0f, 0.0f, 0.04f, 0.0f, 0.0f, 0.0f, 0.0f, false, "textures/moons/4k_io.jpg", "textures/moons/io_glow.png", "", "", ""); 
         io.parentIndex = 5; planets.push_back(io); 
         
-        Planet europa = createPlanet("Europa", 1, 0.08f, 1.9f, 20.0f, 0.009f, 20.0f, 0.0f, 0.47f, 0.0f, 0.0f, 45.0f, 0.0f, false, "textures/moons/europa.jpg", "", "", "", ""); 
+        Planet europa = createPlanet("Europa", 1, 0.08f, 1.9f, 20.0f, 0.009f, 20.0f, 0.0f, 0.47f, 0.0f, 0.0f, 45.0f, 0.0f, false, "textures/moons/4k_europa.jpg", "", "", "", ""); 
         europa.parentIndex = 5; planets.push_back(europa);
         
-        Planet ganymede = createPlanet("Ganymede", 1, 0.12f, 3.0f, 10.0f, 0.001f, 10.0f, 0.0f, 0.2f, 0.0f, 0.0f, 90.0f, 0.0f, false, "textures/moons/ganymede.jpg", "", "", "", ""); 
+        Planet ganymede = createPlanet("Ganymede", 1, 0.12f, 3.0f, 10.0f, 0.001f, 10.0f, 0.0f, 0.2f, 0.0f, 0.0f, 90.0f, 0.0f, false, "textures/moons/4k_ganymede.jpg", "", "", "", ""); 
         ganymede.parentIndex = 5; planets.push_back(ganymede);
         
-        Planet callisto = createPlanet("Callisto", 1, 0.11f, 5.4f, 4.2f, 0.007f, 4.2f, 0.0f, 0.28f, 0.0f, 0.0f, 135.0f, 0.0f, false, "textures/moons/callisto.jpg", "", "", "", ""); 
+        Planet callisto = createPlanet("Callisto", 1, 0.11f, 5.4f, 4.2f, 0.007f, 4.2f, 0.0f, 0.28f, 0.0f, 0.0f, 135.0f, 0.0f, false, "textures/moons/4k_callisto.jpg", "", "", "", ""); 
         callisto.parentIndex = 5; planets.push_back(callisto);
 
-        Planet titan = createPlanet("Titan", 1, 0.11f, 2.0f, 5.0f, 0.028f, 5.0f, 0.0f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f, true, "textures/moons/titan.jpg", "", "", "", "textures/moons/titan_atmosphere.jpg"); 
+        Planet titan = createPlanet("Titan", 1, 0.11f, 2.0f, 5.0f, 0.028f, 5.0f, 0.0f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f, true, "textures/moons/4k_titan.jpg", "", "", "", "textures/moons/titan_atmosphere.jpg"); 
         titan.parentIndex = 6; planets.push_back(titan);
         
         // 6. 4가지 소행성 개별 텍스처 로딩 (기존 asteroidBelt 대체)

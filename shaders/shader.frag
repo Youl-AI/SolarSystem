@@ -503,7 +503,15 @@ void main() {
         float diff = max(dot(preciseNormal, lightDir), 0.0) * shadow;
         vec3 moonAlbedo = ApplyDetail(texture(texDiffuse, fragTexCoord).rgb, baseNormal,
                                      DetailFactor(fragTexCoord, texDiffuse));
-        writeOut(vec4(moonAlbedo * diff, 1.0));
+
+        // 이오의 화산 열점은 용암이 식으며 내는 열복사라 햇빛과 무관하게 스스로 빛난다.
+        // 낮에는 반사광에 묻혀 안 보이므로 밤면에서만 드러나게 한다(지구 야경과 같은 방식).
+        // 열점 마스크가 없는 천체는 더미 검정이 바인딩되어 이 항이 0이 된다.
+        float glowMask = texture(texNight, fragTexCoord).r;
+        float nightSide = 1.0 - smoothstep(-0.05, 0.25, dot(baseNormal, lightDir) * shadow);
+        vec3 glow = glowMask * nightSide * vec3(1.0, 0.30, 0.06) * 0.8;
+
+        writeOut(vec4(moonAlbedo * diff + glow, 1.0));
         return;
     }
     else if (fragObjectType == 2) { // 구름
