@@ -2447,8 +2447,100 @@ private:
         vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
         imageView = createImageView(image, format, VK_IMAGE_ASPECT_COLOR_BIT);
     }
+    // BC7 DDS를 읽어 압축된 블록을 그대로 GPU에 올린다.
+    //
+    // texconv가 내는 DDS는 헤더 124바이트 + DX10 확장 20바이트 뒤에 밉 레벨이 큰 것부터
+    // 차례로 붙어 있다. 블록 압축이라 한 레벨의 크기는 4로 올림한 블록 수 x 16바이트다.
+    // GPU가 BC7을 못 쓰면 VK_NULL_HANDLE을 돌려 호출자가 원본 이미지로 물러나게 한다.
+    VkImageView loadDDS(const std::string &path, bool srgb) {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return VK_NULL_HANDLE;
+        std::vector<uint8_t> buf(static_cast<size_t>(f.tellg()));
+        f.seekg(0); f.read(reinterpret_cast<char *>(buf.data()), buf.size());
+        if (buf.size() < 148 || memcmp(buf.data(), "DDS ", 4) != 0) return VK_NULL_HANDLE;
+
+        auto u32 = [&](size_t o) { uint32_t v; memcpy(&v, buf.data() + o, 4); return v; };
+        uint32_t height = u32(12), width = u32(16), mips = u32(28);
+        bool dx10 = memcmp(buf.data() + 84, "DX10", 4) == 0;
+        if (!dx10) return VK_NULL_HANDLE;              // BC7은 DX10 확장 헤더로만 표현된다
+        uint32_t dxgi = u32(128);
+        if (dxgi != 98 && dxgi != 99) return VK_NULL_HANDLE;   // 98=BC7_UNORM, 99=BC7_UNORM_SRGB
+        if (mips == 0) mips = 1;
+
+        VkFormat format = srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
+        if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
+            static bool warned = false;
+            if (!warned) { std::cerr << "이 GPU는 BC7을 지원하지 않습니다. 원본 텍스처를 씁니다.\n"; warned = true; }
+            return VK_NULL_HANDLE;
+        }
+
+        const size_t dataOffset = 148;                  // 4 + 124 + 20
+        std::vector<VkBufferImageCopy> regions;
+        size_t offset = dataOffset;
+        for (uint32_t m = 0; m < mips; ++m) {
+            uint32_t w = std::max(1u, width >> m), h = std::max(1u, height >> m);
+            size_t bytes = static_cast<size_t>((w + 3) / 4) * ((h + 3) / 4) * 16;
+            if (offset + bytes > buf.size()) { mips = m; break; }   // 잘린 파일은 있는 데까지만
+            VkBufferImageCopy r{};
+            r.bufferOffset = offset - dataOffset;
+            r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1};
+            r.imageExtent = {w, h, 1};
+            regions.push_back(r);
+            offset += bytes;
+        }
+        if (regions.empty()) return VK_NULL_HANDLE;
+
+        VkDeviceSize total = offset - dataOffset;
+        VkBuffer staging; VkDeviceMemory stagingMem;
+        createBuffer(total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     staging, stagingMem);
+        void *dst; vkMapMemory(device, stagingMem, 0, total, 0, &dst);
+        memcpy(dst, buf.data() + dataOffset, static_cast<size_t>(total));
+        vkUnmapMemory(device, stagingMem);
+
+        VkImage img; VkDeviceMemory mem;
+        createImage(width, height, format, VK_IMAGE_TILING_OPTIMAL,
+                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, img, mem, mips);
+        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, mips);
+        VkCommandBuffer cb = beginSingleTimeCommands();
+        vkCmdCopyBufferToImage(cb, staging, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               static_cast<uint32_t>(regions.size()), regions.data());
+        endSingleTimeCommands(cb);
+        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1, mips);
+        vkDestroyBuffer(device, staging, nullptr); vkFreeMemory(device, stagingMem, nullptr);
+
+        VkImageView view = createImageView(img, format, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, 1, mips);
+        allImages.push_back(img); allMemories.push_back(mem); allViews.push_back(view);
+        return view;
+    }
+
+    // BC7로 미리 압축해 둔 .dds가 옆에 있으면 그것을 쓴다.
+    //
+    // 색상 텍스처는 GPU에서 픽셀당 4바이트로 풀려 있어 VRAM의 대부분을 차지한다. BC7은
+    // 4x4 블록을 16바이트로 저장해 정확히 1/4로 줄이면서, 측정상 지금 쓰는 JPEG보다
+    // 손실이 작다(달 8K: BC7 44.3dB 대 JPEG q92 40.4dB). 노말맵은 제외했다 — 법선은
+    // 블록당 대표색 2개를 잇는 직선으로 근사되지 않아 오차가 커진다.
+    //
+    // 압축 포맷은 blit으로 밉맵을 만들 수 없으므로 texconv가 구울 때 함께 넣어 둔다.
+    static std::string ddsPathFor(const std::string &path) {
+        size_t dot = path.find_last_of('.');
+        return (dot == std::string::npos) ? path + ".dds" : path.substr(0, dot) + ".dds";
+    }
+
     VkImageView loadTexture(const std::string &path, VkFormat format) {
         if (path.empty()) return (format == VK_FORMAT_R8G8B8A8_UNORM) ? viewDummyFlatNormal : viewDummyBlack;
+
+        std::string dds = ddsPathFor(path);
+        if (std::ifstream(dds, std::ios::binary).good()) {
+            VkImageView v = loadDDS(dds, format == VK_FORMAT_R8G8B8A8_SRGB);
+            if (v != VK_NULL_HANDLE) return v;
+            std::cerr << "DDS 로드 실패, 원본으로 대체: " << dds << "\n";
+        }
+
         VkImage img; VkDeviceMemory mem; VkImageView view; int texWidth, texHeight, texChannels;
         stbi_uc *pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         if (!pixels) { std::cerr << "텍스처 없음, 더미 사용: " << path << "\n"; return viewDummyBlack; }
