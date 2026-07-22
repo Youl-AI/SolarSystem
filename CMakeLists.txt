@@ -47,6 +47,7 @@ set(IMGUI_DIR ${imgui_SOURCE_DIR})
 # 실행 파일 생성 (main.cpp 외에 ImGui의 필수 소스 파일들도 함께 빌드!)
 add_executable(Ephemeris 
     src/main.cpp
+    src/third_party_impl.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
@@ -62,6 +63,7 @@ endif()
 # Vulkan 헤더 및 라이브러리, 그리고 ImGui 경로 연결
 target_include_directories(Ephemeris PRIVATE 
     ${Vulkan_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${IMGUI_DIR}            # imgui.h 를 찾기 위해 추가
     ${IMGUI_DIR}/backends   # imgui_impl_glfw.h 등을 찾기 위해 추가
 )
