@@ -14,5 +14,6 @@
 #define TINYEXR_USE_STB_ZLIB 1    // 대신 이미 있는 stb_image의 zlib 코드를 사용해!
 #include "tinyexr.h"
 
+// [NEW] OBJ 로더 및 난수 생성 라이브러리 추가
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
