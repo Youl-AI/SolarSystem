@@ -52,6 +52,7 @@ add_executable(Ephemeris
     src/core/GpuProfiler.cpp
     src/sim/CelestialData.cpp
     src/sim/AsteroidBelt.cpp
+    src/gfx/MeshGen.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
