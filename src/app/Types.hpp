@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../VulkanBase.hpp"   // Vertex, Vk* 핸들
+#include "../core/Settings.hpp"
 #include <glm/glm.hpp>
 #include <string>
 
@@ -62,30 +63,6 @@ struct UniformBufferObject {
     alignas(16) glm::vec4 occluderParams[MAX_OCCLUDERS];
     int occluderCount;
 };
-
-struct GraphicsSettings {
-    int   resolutionIndex = 2;   // index into kResolutions; 2 = 1920x1080
-    float renderScale     = 1.0f;
-    int   msaaLevel       = 8;   // 0=off, else 2/4/8; clamped to device support
-    bool  vsync           = true;
-    float fovDegrees      = 45.0f;
-    float exposure        = 1.0f;
-    int   frameCap        = 0;   // 0 = unlimited
-    bool  showFps         = false;
-    bool  showGpuTimes    = false;  // 패스별 GPU 시간 오버레이
-    bool  fullscreen      = false;
-    bool  orbitLines      = false;
-    bool  realScale       = false;
-    // 하늘의 사실성. 축척과는 별개의 축이라 따로 둔다 — 압축 축척으로 태양계를 보면서도
-    // 맨눈에 실제로 보이는 별하늘을 볼 수 있어야 한다.
-    bool  realStars       = false;
-    bool  asteroids       = true;   // 끄면 소행성대/카이퍼벨트를 통째로 건너뛴다
-};
-
-static const int kResolutions[][2] = {
-    {1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}
-};
-static const int RESOLUTION_COUNT = 5;
 
 struct Planet {
     std::string name; int typeId;

@@ -3,6 +3,7 @@
 #include "Types.hpp"
 #include "../VulkanBase.hpp"
 #include "../Camera.hpp"
+#include "../core/Settings.hpp"
 
 #include <glm/gtc/packing.hpp>   // packHalf2x16: 스카이박스를 fp16으로 접어 올린다
 
@@ -526,47 +527,6 @@ protected:
         return VK_SAMPLE_COUNT_1_BIT;
     }
 
-    void loadSettings() {
-        std::ifstream f("settings.ini");
-        if (!f.is_open()) return; // 파일 없으면 구조체 기본값 유지
-        std::string line;
-        while (std::getline(f, line)) {
-            auto eq = line.find('=');
-            if (eq == std::string::npos) continue;
-            std::string k = line.substr(0, eq), v = line.substr(eq + 1);
-            try {
-                if      (k == "resolutionIndex") settings.resolutionIndex = std::clamp(std::stoi(v), 0, RESOLUTION_COUNT - 1);
-                else if (k == "renderScale")     settings.renderScale = std::clamp(std::stof(v), 0.5f, 2.0f);
-                else if (k == "msaaLevel")       settings.msaaLevel = std::stoi(v);
-                else if (k == "vsync")           settings.vsync = (std::stoi(v) != 0);
-                else if (k == "fovDegrees")      settings.fovDegrees = std::clamp(std::stof(v), 30.0f, 90.0f);
-                else if (k == "exposure")        settings.exposure = std::clamp(std::stof(v), 0.3f, 3.0f);
-                else if (k == "frameCap")        settings.frameCap = std::max(0, std::stoi(v));
-                else if (k == "showFps")         settings.showFps = (std::stoi(v) != 0);
-                else if (k == "showGpuTimes")    settings.showGpuTimes = (std::stoi(v) != 0);
-                else if (k == "fullscreen")      settings.fullscreen = (std::stoi(v) != 0);
-                // orbitLines / realScale / realStars는 의도적으로 복원하지 않는다: 매 실행 항상 OFF로 시작하는
-                // 런타임 뷰 토글이다. (구버전 settings.ini에 남아 있어도 무시)
-            } catch (...) { /* 잘못된 값은 무시하고 기본값 유지 */ }
-        }
-    }
-
-    void saveSettings() {
-        std::ofstream f("settings.ini", std::ios::trunc);
-        if (!f.is_open()) return; // 저장 실패는 조용히 무시
-        f << "resolutionIndex=" << settings.resolutionIndex << "\n"
-          << "renderScale="     << settings.renderScale     << "\n"
-          << "msaaLevel="       << settings.msaaLevel       << "\n"
-          << "vsync="           << (settings.vsync ? 1 : 0) << "\n"
-          << "fovDegrees="      << settings.fovDegrees      << "\n"
-          << "exposure="        << settings.exposure        << "\n"
-          << "frameCap="        << settings.frameCap        << "\n"
-          << "showFps="         << (settings.showFps ? 1 : 0) << "\n"
-          << "showGpuTimes="    << (settings.showGpuTimes ? 1 : 0) << "\n"
-          << "fullscreen="      << (settings.fullscreen ? 1 : 0) << "\n";
-        // orbitLines / realScale / realStars는 저장하지 않는다 — 항상 OFF로 시작하는 런타임 전용 뷰 토글.
-    }
-
     // ── 성능 계측 (개발자 전용) ──────────────────────────────────────────
     // SOLAR_PROFILE=1 환경변수를 주고 실행할 때만 켜진다. 배포판을 그냥 실행하면
     // 타임스탬프도 안 찍고 설정 창에 항목도 나오지 않는다 — 최종 사용자에게 보여 줄
@@ -658,7 +618,7 @@ protected:
     }
 
     void initApp() override {
-        loadSettings();
+        loadSettings(settings);
         initProfiling();
         // 진단용: 시작 시 특정 행성에 잠근다(SOLAR_LOCK=5 → 목성). 카메라를 직접 몰지 않고
         // 셰도우 맵 같은 시점 의존 기능을 재현하려고 둔 것이다.
@@ -2158,7 +2118,7 @@ protected:
         if (!inSim) ImGui::EndDisabled();
 
         ImGui::Spacing();
-        if (ImGui::Button("Close", ImVec2(120.0f, 30.0f))) { settingsOpen = false; saveSettings(); }
+        if (ImGui::Button("Close", ImVec2(120.0f, 30.0f))) { settingsOpen = false; saveSettings(settings); }
 
         ImGui::End();
     }

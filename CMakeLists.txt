@@ -45,9 +45,10 @@ set(IMGUI_DIR ${imgui_SOURCE_DIR})
 # =========================================================
 
 # 실행 파일 생성 (main.cpp 외에 ImGui의 필수 소스 파일들도 함께 빌드!)
-add_executable(Ephemeris 
+add_executable(Ephemeris
     src/main.cpp
     src/third_party_impl.cpp
+    src/core/Settings.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
