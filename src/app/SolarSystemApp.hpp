@@ -397,101 +397,22 @@ protected:
 
     // 오프스크린/블러 이미지·프레임버퍼 전용 파괴 헬퍼. recreateSwapChain()과
     // recreateOffscreenAndBlur() 양쪽에서 재사용한다(Task 6의 MSAA 재생성도 재사용 예정).
-    void destroyOffscreenAndBlurResources() {
-        for (int i = 0; i < bloomMipCount; i++) {
-            vkDestroyFramebuffer(device, bloomFramebuffers[i], nullptr);
-            vkDestroyImageView(device, bloomMipViews[i], nullptr);
-        }
-        vkDestroyImage(device, bloomImage, nullptr);
-        vkFreeMemory(device, bloomMem, nullptr);
-        vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr);
-        vkDestroyImageView(device, offscreenColorView, nullptr); vkDestroyImage(device, offscreenColorImage, nullptr); vkFreeMemory(device, offscreenColorMem, nullptr);
-        vkDestroyImageView(device, offscreenBrightView, nullptr); vkDestroyImage(device, offscreenBrightImage, nullptr); vkFreeMemory(device, offscreenBrightMem, nullptr);
-        vkDestroyImageView(device, offscreenDepthView, nullptr); vkDestroyImage(device, offscreenDepthImage, nullptr); vkFreeMemory(device, offscreenDepthMem, nullptr);
-        vkDestroyImageView(device, msaaColorView, nullptr); vkDestroyImage(device, msaaColorImage, nullptr); vkFreeMemory(device, msaaColorMem, nullptr);
-        vkDestroyImageView(device, msaaBrightView, nullptr); vkDestroyImage(device, msaaBrightImage, nullptr); vkFreeMemory(device, msaaBrightMem, nullptr);
-    }
+    void destroyOffscreenAndBlurResources();
 
-    void recreateSwapChain() {
-        vkDeviceWaitIdle(device);
-
-        destroyOffscreenAndBlurResources();
-
-        cleanupSwapChain();
-
-        createSwapChain();
-        createRenderFinishedSemaphores(); // 이미지 수가 달라질 수 있으므로 다시 만든다
-        computeRenderExtent(); // 창 크기 변경 시 오프스크린도 scale x 새-창크기로 유지
-        createImageViews();
-        createDepthResources();
-        createFramebuffers();
-
-        createOffscreenImages();
-        createBlurImages();
-        updateBlurDescriptorSets();
-        updatePostDescriptorSets();
-    }
+    void recreateSwapChain();
 
     // 렌더스케일(및 Task 6의 MSAA) 변경 시 오프스크린/블러만 다시 만든다. 스왑체인은 그대로.
-    void recreateOffscreenAndBlur() {
-        destroyOffscreenAndBlurResources();
-        createOffscreenImages();
-        createBlurImages();
-        updateBlurDescriptorSets();
-        updatePostDescriptorSets();
-    }
+    void recreateOffscreenAndBlur();
 
-    void recreateOffscreenForMsaa() {
-        // 오프스크린 파이프라인(graphics/line)과 렌더패스는 샘플 수가 생성 시 고정되므로 다시 만든다.
-        // 블러/포스트는 resolve된 단일 샘플 이미지를 쓰므로 MSAA와 무관 — 렌더패스/이미지는 그대로 두고
-        // resolve 대상 뷰만 새로 바인딩한다.
-        vkDestroyPipeline(device, graphicsPipeline, nullptr);
-        vkDestroyPipeline(device, linePipeline, nullptr);
-        vkDestroyPipeline(device, atmospherePipeline, nullptr);
-        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-
-        vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr);
-        vkDestroyImageView(device, offscreenColorView, nullptr); vkDestroyImage(device, offscreenColorImage, nullptr); vkFreeMemory(device, offscreenColorMem, nullptr);
-        vkDestroyImageView(device, offscreenBrightView, nullptr); vkDestroyImage(device, offscreenBrightImage, nullptr); vkFreeMemory(device, offscreenBrightMem, nullptr);
-        vkDestroyImageView(device, offscreenDepthView, nullptr); vkDestroyImage(device, offscreenDepthImage, nullptr); vkFreeMemory(device, offscreenDepthMem, nullptr);
-        vkDestroyImageView(device, msaaColorView, nullptr); vkDestroyImage(device, msaaColorImage, nullptr); vkFreeMemory(device, msaaColorMem, nullptr);
-        vkDestroyImageView(device, msaaBrightView, nullptr); vkDestroyImage(device, msaaBrightImage, nullptr); vkFreeMemory(device, msaaBrightMem, nullptr);
-        vkDestroyRenderPass(device, offscreenRenderPass, nullptr);
-        vkDestroySampler(device, offscreenSampler, nullptr);
-
-        createOffscreenResources();  // 렌더패스 + 이미지 + 프레임버퍼 + 샘플러 (새 msaaSamples 반영)
-        createGraphicsPipeline();    // graphics + line + pipelineLayout (새 msaaSamples 반영)
-
-        updateBlurDescriptorSets();  // 새 offscreenBrightView + 새 샘플러 재바인딩
-        updatePostDescriptorSets();  // 새 offscreenColorView + 새 샘플러 재바인딩
-    }
+    void recreateOffscreenForMsaa();
 
     // 색상과 깊이 어태치먼트가 공통으로 지원하는 최대 샘플 수를 8x로 상한을 두고 고른다.
     // (오프스크린 패스는 두 종류를 한 서브패스에서 쓰므로 교집합이어야 한다)
     // 8x 미지원이면 4x, 2x, 1x 순으로 자동 강등된다.
-    VkSampleCountFlagBits pickMsaaSamples() {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(physicalDevice, &props);
-        VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts
-                                  & props.limits.framebufferDepthSampleCounts;
-        VkSampleCountFlagBits chosen = VK_SAMPLE_COUNT_1_BIT;
-        if (counts & VK_SAMPLE_COUNT_8_BIT)      chosen = VK_SAMPLE_COUNT_8_BIT;
-        else if (counts & VK_SAMPLE_COUNT_4_BIT) chosen = VK_SAMPLE_COUNT_4_BIT;
-        else if (counts & VK_SAMPLE_COUNT_2_BIT) chosen = VK_SAMPLE_COUNT_2_BIT;
-        fprintf(stderr, "[MSAA] selected %dx (device supports mask 0x%x)\n", (int)chosen, (unsigned)counts);
-        return chosen;
-    }
+    VkSampleCountFlagBits pickMsaaSamples();
 
     // 설정의 MSAA 레벨(0/2/4/8)을 기기 지원으로 클램프해 VkSampleCountFlagBits로 변환한다.
-    VkSampleCountFlagBits clampMsaaLevel(int level) {
-        VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(physicalDevice, &props);
-        VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
-        auto ok = [&](VkSampleCountFlagBits b){ return (counts & b) != 0; };
-        if (level >= 8 && ok(VK_SAMPLE_COUNT_8_BIT)) return VK_SAMPLE_COUNT_8_BIT;
-        if (level >= 4 && ok(VK_SAMPLE_COUNT_4_BIT)) return VK_SAMPLE_COUNT_4_BIT;
-        if (level >= 2 && ok(VK_SAMPLE_COUNT_2_BIT)) return VK_SAMPLE_COUNT_2_BIT;
-        return VK_SAMPLE_COUNT_1_BIT;
-    }
+    VkSampleCountFlagBits clampMsaaLevel(int level);
 
     GpuProfiler profiler;
 
@@ -689,72 +610,7 @@ protected:
         initImGui();
     }
 
-    void createComputeResources() {
-        VkDeviceSize inputSize = asteroidTransforms.size() * sizeof(AsteroidData);
-        createBuffer(inputSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, computeInputBuffer, computeInputMem);
-        void* inData; vkMapMemory(device, computeInputMem, 0, inputSize, 0, &inData);
-        memcpy(inData, asteroidTransforms.data(), inputSize);
-        vkUnmapMemory(device, computeInputMem);
-
-        // 각 소행성은 12개 바구니 중 정확히 하나로 들어가지만, 어느 바구니에 몰릴지는
-        // 시점에 따라 달라진다. 한 바구니가 전부를 받아도 넘치지 않도록 잡는다.
-        // (예전엔 20000이 박혀 있어, 생성한 40000개 중 절반이 아예 그려지지 않았다)
-        asteroidBucketCapacity = static_cast<uint32_t>(asteroidTransforms.size());
-        VkDeviceSize outputSize = (VkDeviceSize)12 * asteroidBucketCapacity * sizeof(glm::mat4);
-        createBuffer(outputSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, computeOutputBuffer, computeOutputMem);
-
-        VkDeviceSize indirectSize = 12 * sizeof(VkDrawIndexedIndirectCommand);
-        createBuffer(indirectSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, indirectDrawBuffer, indirectDrawMem);
-        vkMapMemory(device, indirectDrawMem, 0, indirectSize, 0, &indirectDrawMapped);
-
-        for (int lod = 0; lod < 3; ++lod) {
-            for (int type = 0; type < 4; ++type) {
-                int bucket = lod * 4 + type;
-                drawCmdTemplates[bucket].instanceCount = 0;
-                drawCmdTemplates[bucket].firstInstance = bucket * asteroidBucketCapacity;
-                if (lod == 0) { drawCmdTemplates[bucket].indexCount = highLodIndexCount[type]; drawCmdTemplates[bucket].firstIndex = highLodFirstIndex[type]; drawCmdTemplates[bucket].vertexOffset = highLodVertexOffset[type]; }
-                else if (lod == 1) { drawCmdTemplates[bucket].indexCount = midLodIndexCount[type]; drawCmdTemplates[bucket].firstIndex = midLodFirstIndex[type]; drawCmdTemplates[bucket].vertexOffset = midLodVertexOffset[type]; }
-                else { drawCmdTemplates[bucket].indexCount = lowLodIndexCount[type]; drawCmdTemplates[bucket].firstIndex = lowLodFirstIndex[type]; drawCmdTemplates[bucket].vertexOffset = lowLodVertexOffset[type]; }
-            }
-        }
-        memcpy(indirectDrawMapped, drawCmdTemplates, indirectSize);
-
-        std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
-        bindings[0].binding = 0; bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; bindings[0].descriptorCount = 1; bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings[1].binding = 1; bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bindings[1].descriptorCount = 1; bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings[2].binding = 2; bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bindings[2].descriptorCount = 1; bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings[3].binding = 3; bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bindings[3].descriptorCount = 1; bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        
-        VkDescriptorSetLayoutCreateInfo layoutInfo{}; layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layoutInfo.bindingCount = 4; layoutInfo.pBindings = bindings.data();
-        vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &computeDescriptorSetLayout);
-
-        VkDescriptorSetAllocateInfo allocInfo{}; allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; allocInfo.descriptorPool = descriptorPool; allocInfo.descriptorSetCount = 1; allocInfo.pSetLayouts = &computeDescriptorSetLayout;
-        vkAllocateDescriptorSets(device, &allocInfo, &computeDescriptorSet);
-
-        VkDescriptorBufferInfo uboInfo{uniformBuffer, 0, sizeof(UniformBufferObject)};
-        VkDescriptorBufferInfo inInfo{computeInputBuffer, 0, inputSize};
-        VkDescriptorBufferInfo outInfo{computeOutputBuffer, 0, outputSize};
-        VkDescriptorBufferInfo indInfo{indirectDrawBuffer, 0, indirectSize};
-
-        std::array<VkWriteDescriptorSet, 4> writes{};
-        for(int i=0; i<4; i++) { writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet = computeDescriptorSet; writes[i].dstBinding = i; writes[i].descriptorCount = 1; writes[i].descriptorType = (i==0) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; }
-        writes[0].pBufferInfo = &uboInfo; writes[1].pBufferInfo = &inInfo; writes[2].pBufferInfo = &outInfo; writes[3].pBufferInfo = &indInfo;
-        vkUpdateDescriptorSets(device, 4, writes.data(), 0, nullptr);
-
-        auto compCode = readFile("shaders/asteroid_cull.spv"); 
-        VkShaderModule compMod = createShaderModule(compCode);
-        VkPipelineShaderStageCreateInfo stageInfo{}; stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT; stageInfo.module = compMod; stageInfo.pName = "main";
-        
-        // LOD 판정을 렌더 좌표계에서 하기 위한 벨트 행렬 + 실제 소행성 개수.
-        VkPushConstantRange compPush{}; compPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; compPush.offset = 0; compPush.size = sizeof(AsteroidCullPush);
-        VkPipelineLayoutCreateInfo pLayoutInfo{}; pLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayoutInfo.setLayoutCount = 1; pLayoutInfo.pSetLayouts = &computeDescriptorSetLayout;
-        pLayoutInfo.pushConstantRangeCount = 1; pLayoutInfo.pPushConstantRanges = &compPush;
-        vkCreatePipelineLayout(device, &pLayoutInfo, nullptr, &computePipelineLayout);
-        
-        VkComputePipelineCreateInfo pipelineInfo{}; pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; pipelineInfo.stage = stageInfo; pipelineInfo.layout = computePipelineLayout;
-        vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
-        vkDestroyShaderModule(device, compMod, nullptr);
-    }
+    void createComputeResources();
     // =========================================================
 
     bool worldToScreen(glm::vec3 worldPos, glm::mat4 view, glm::mat4 proj, float screenWidth, float screenHeight, glm::vec2& outScreenPos) {
@@ -817,281 +673,23 @@ protected:
     }
 
             // 오프스크린/블러 렌더 크기 = round(renderScale x swapChainExtent). 포스트/UI는 계속 swapChainExtent.
-    void computeRenderExtent() {
-        uint32_t w = std::max(1u, (uint32_t)std::lround(swapChainExtent.width  * settings.renderScale));
-        uint32_t h = std::max(1u, (uint32_t)std::lround(swapChainExtent.height * settings.renderScale));
-        renderExtent = {w, h};
-        blurExtent = {std::max(1u, w / 2), std::max(1u, h / 2)};
-    }
+    void computeRenderExtent();
 
-    void createOffscreenImages() {
-        computeRenderExtent();
-        VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT; VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
-        auto makeImg = [&](VkFormat fmt, VkImageUsageFlags usage, VkImage& img, VkDeviceMemory& mem, VkImageView& view, VkImageAspectFlags aspect, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT) {
-            VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D;
-            iInfo.extent.width = renderExtent.width; iInfo.extent.height = renderExtent.height; iInfo.extent.depth = 1; iInfo.mipLevels = 1; iInfo.arrayLayers = 1; iInfo.format = fmt; iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; iInfo.usage = usage; iInfo.samples = samples; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            vkCreateImage(device, &iInfo, nullptr, &img);
-            VkMemoryRequirements mReqs; vkGetImageMemoryRequirements(device, img, &mReqs);
-            VkMemoryAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            aInfo.allocationSize = mReqs.size; aInfo.memoryTypeIndex = findMemoryType(mReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            vkAllocateMemory(device, &aInfo, nullptr, &mem); vkBindImageMemory(device, img, mem, 0);
-            VkImageViewCreateInfo vInfo{}; vInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vInfo.image = img; vInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            vInfo.format = fmt; vInfo.subresourceRange.aspectMask = aspect; vInfo.subresourceRange.baseMipLevel = 0; vInfo.subresourceRange.levelCount = 1; vInfo.subresourceRange.baseArrayLayer = 0; vInfo.subresourceRange.layerCount = 1;
-            vkCreateImageView(device, &vInfo, nullptr, &view);
-        };
-        // resolve 대상(단일 샘플, 이후 블러/포스트가 SAMPLED). MSAA 색상/bright가 여기로 resolve된다.
-        makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, offscreenColorImage, offscreenColorMem, offscreenColorView, VK_IMAGE_ASPECT_COLOR_BIT);
-        makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, offscreenBrightImage, offscreenBrightMem, offscreenBrightView, VK_IMAGE_ASPECT_COLOR_BIT);
+    void createOffscreenImages();
 
-        // 멀티샘플 렌더 타겟들. 색상/bright는 resolve되므로 SAMPLED 불필요. 깊이는 MSAA 렌더 타겟 겸용.
-        makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, msaaColorImage, msaaColorMem, msaaColorView, VK_IMAGE_ASPECT_COLOR_BIT, msaaSamples);
-        makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, msaaBrightImage, msaaBrightMem, msaaBrightView, VK_IMAGE_ASPECT_COLOR_BIT, msaaSamples);
-        makeImg(VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, offscreenDepthImage, offscreenDepthMem, offscreenDepthView, VK_IMAGE_ASPECT_DEPTH_BIT, msaaSamples);
+    void createOffscreenResources();
 
-        // 어태치먼트 순서는 렌더패스와 반드시 일치: 0=MSAA색상 1=MSAA-bright 2=MSAA깊이 3=resolve색상 4=resolve-bright
-        std::array<VkImageView, 5> fbAtts = {msaaColorView, msaaBrightView, offscreenDepthView, offscreenColorView, offscreenBrightView};
-        VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbInfo.renderPass = offscreenRenderPass; fbInfo.attachmentCount = 5; fbInfo.pAttachments = fbAtts.data(); fbInfo.width = renderExtent.width; fbInfo.height = renderExtent.height; fbInfo.layers = 1;
-        vkCreateFramebuffer(device, &fbInfo, nullptr, &offscreenFramebuffer);
-    }
+    void createBlurImages();
 
-    void createOffscreenResources() {
-        VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT; VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
+    void createBlurResources();
 
-        // 어태치먼트 순서는 프레임버퍼와 반드시 일치:
-        //   0=MSAA색상 1=MSAA-bright 2=MSAA깊이 (전부 msaaSamples, resolve/렌더용이라 storeOp=DONT_CARE)
-        //   3=resolve색상 4=resolve-bright (단일 샘플, loadOp=DONT_CARE로 resolve가 전체를 덮어씀, STORE, 이후 SAMPLED)
-        std::array<VkAttachmentDescription, 5> atts{};
-        atts[0].format = colorFormat; atts[0].samples = msaaSamples; atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        atts[1] = atts[0];
-        atts[2].format = depthFormat; atts[2].samples = msaaSamples; atts[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; atts[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; atts[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[2].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        atts[3].format = colorFormat; atts[3].samples = VK_SAMPLE_COUNT_1_BIT; atts[3].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[3].storeOp = VK_ATTACHMENT_STORE_OP_STORE; atts[3].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[3].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; atts[3].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[3].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        atts[4] = atts[3];
+    void updateBlurDescriptorSets();
 
-        VkAttachmentReference colRefs[2] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
-        VkAttachmentReference depRef{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-        // resolve 참조는 색상 참조와 인덱스가 1:1 대응한다. resolve[i]가 color[i]를 다운샘플한다.
-        VkAttachmentReference resolveRefs[2] = {{3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {4, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
-        VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; subpass.colorAttachmentCount = 2; subpass.pColorAttachments = colRefs; subpass.pResolveAttachments = resolveRefs; subpass.pDepthStencilAttachment = &depRef;
+    void createBlurPipeline();
 
-        std::array<VkSubpassDependency, 2> deps{};
-        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0; deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT; deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL; deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    void updatePostDescriptorSets();
 
-        VkRenderPassCreateInfo rpInfo{}; rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpInfo.attachmentCount = 5; rpInfo.pAttachments = atts.data(); rpInfo.subpassCount = 1; rpInfo.pSubpasses = &subpass; rpInfo.dependencyCount = 2; rpInfo.pDependencies = deps.data();
-        vkCreateRenderPass(device, &rpInfo, nullptr, &offscreenRenderPass);
-
-        createOffscreenImages();
-
-        VkSamplerCreateInfo sInfo{}; sInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO; sInfo.magFilter = VK_FILTER_LINEAR; sInfo.minFilter = VK_FILTER_LINEAR; sInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; sInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; sInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        vkCreateSampler(device, &sInfo, nullptr, &offscreenSampler);
-    }
-
-    void createBlurImages() {
-        VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-
-        // 밉 단계 수: 가장 작은 변이 8픽셀 밑으로 내려가지 않을 때까지.
-        bloomMipCount = 1;
-        while (bloomMipCount < BLOOM_MAX_MIPS
-               && (blurExtent.width >> bloomMipCount) >= 8
-               && (blurExtent.height >> bloomMipCount) >= 8) {
-            bloomMipCount++;
-        }
-        for (int i = 0; i < bloomMipCount; ++i) {
-            bloomMipExtents[i] = { std::max(1u, blurExtent.width >> i), std::max(1u, blurExtent.height >> i) };
-        }
-
-        VkImageCreateInfo iInfo{}; iInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; iInfo.imageType = VK_IMAGE_TYPE_2D;
-        iInfo.extent = { blurExtent.width, blurExtent.height, 1 };
-        iInfo.mipLevels = bloomMipCount; iInfo.arrayLayers = 1; iInfo.format = colorFormat;
-        iInfo.tiling = VK_IMAGE_TILING_OPTIMAL; iInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        iInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        iInfo.samples = VK_SAMPLE_COUNT_1_BIT; iInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        vkCreateImage(device, &iInfo, nullptr, &bloomImage);
-
-        VkMemoryRequirements mReqs; vkGetImageMemoryRequirements(device, bloomImage, &mReqs);
-        VkMemoryAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; aInfo.allocationSize = mReqs.size;
-        aInfo.memoryTypeIndex = findMemoryType(mReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        vkAllocateMemory(device, &aInfo, nullptr, &bloomMem);
-        vkBindImageMemory(device, bloomImage, bloomMem, 0);
-
-        // 밉마다 '그 한 단계만' 보는 뷰를 만든다. 렌더 타겟으로도, 샘플링 소스로도 쓴다.
-        // 뷰가 한 단계만 덮으므로 레이아웃 전환도 그 밉에만 적용되어, 같은 이미지의
-        // 다른 밉을 읽으면서 이 밉에 그리는 것이 안전하다.
-        for (int i = 0; i < bloomMipCount; ++i) {
-            VkImageViewCreateInfo vInfo{}; vInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            vInfo.image = bloomImage; vInfo.viewType = VK_IMAGE_VIEW_TYPE_2D; vInfo.format = colorFormat;
-            vInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            vInfo.subresourceRange.baseMipLevel = i; vInfo.subresourceRange.levelCount = 1;
-            vInfo.subresourceRange.baseArrayLayer = 0; vInfo.subresourceRange.layerCount = 1;
-            vkCreateImageView(device, &vInfo, nullptr, &bloomMipViews[i]);
-
-            VkFramebufferCreateInfo fbInfo{}; fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            fbInfo.renderPass = blurRenderPass; fbInfo.attachmentCount = 1; fbInfo.pAttachments = &bloomMipViews[i];
-            fbInfo.width = bloomMipExtents[i].width; fbInfo.height = bloomMipExtents[i].height; fbInfo.layers = 1;
-            vkCreateFramebuffer(device, &fbInfo, nullptr, &bloomFramebuffers[i]);
-        }
-    }
-
-    void createBlurResources() {
-        VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-        VkAttachmentDescription att{}; att.format = colorFormat; att.samples = VK_SAMPLE_COUNT_1_BIT; att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE; att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; subpass.colorAttachmentCount = 1; subpass.pColorAttachments = &colorRef;
-
-        std::array<VkSubpassDependency, 2> deps{};
-        // 업샘플 패스는 loadOp=LOAD로 어태치먼트를 '읽으므로' 읽기 접근도 열어야 한다.
-        // 렌더패스 호환성 판정에는 서브패스 의존성도 포함되므로, 프레임버퍼를 두 패스가
-        // 공유하려면 양쪽 마스크가 같아야 한다. 다운샘플에는 읽기가 없지만 허용해도 무해하다.
-        const VkAccessFlags kColorRW = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
-        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0; deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[0].dstAccessMask = kColorRW;
-        deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL; deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; deps[1].srcAccessMask = kColorRW; deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        VkRenderPassCreateInfo rpInfo{}; rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpInfo.attachmentCount = 1; rpInfo.pAttachments = &att; rpInfo.subpassCount = 1; rpInfo.pSubpasses = &subpass; rpInfo.dependencyCount = 2; rpInfo.pDependencies = deps.data();
-        vkCreateRenderPass(device, &rpInfo, nullptr, &blurRenderPass);
-
-        // 업샘플 패스: 이미 그려진 밉 위에 '더해야' 하므로 기존 내용을 보존한다.
-        // (다운샘플 패스와 어태치먼트 포맷·샘플수가 같아 프레임버퍼를 공유할 수 있다)
-        VkAttachmentDescription attUp = att;
-        attUp.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        attUp.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        // 의존성은 위에서 두 패스가 같도록 맞춰뒀다(프레임버퍼 공유 조건).
-        VkRenderPassCreateInfo rpUp = rpInfo; rpUp.pAttachments = &attUp;
-        vkCreateRenderPass(device, &rpUp, nullptr, &bloomUpPass);
-
-        createBlurImages();
-    }
-
-    void updateBlurDescriptorSets() {
-        auto mI = [&](VkImageView v){ VkDescriptorImageInfo i{}; i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; i.imageView = v; i.sampler = offscreenSampler; return i; };
-
-        std::vector<VkDescriptorImageInfo> infos;
-        infos.reserve(bloomMipCount + 1);
-        infos.push_back(mI(offscreenBrightView));                 // 체인의 입력
-        for (int i = 0; i < bloomMipCount; ++i) infos.push_back(mI(bloomMipViews[i]));
-
-        std::vector<VkWriteDescriptorSet> wr(infos.size());
-        for (size_t i = 0; i < infos.size(); ++i) {
-            wr[i] = {}; wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            wr[i].dstSet = (i == 0) ? bloomSrcSet : bloomMipSets[i - 1];
-            wr[i].dstBinding = 0; wr[i].descriptorCount = 1;
-            wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            wr[i].pImageInfo = &infos[i];
-        }
-        vkUpdateDescriptorSets(device, (uint32_t)wr.size(), wr.data(), 0, nullptr);
-    }
-
-    void createBlurPipeline() {
-        VkDescriptorSetLayoutBinding b{}; b.binding = 0; b.descriptorCount = 1; b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        VkDescriptorSetLayoutCreateInfo layInfo{}; layInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layInfo.bindingCount = 1; layInfo.pBindings = &b;
-        vkCreateDescriptorSetLayout(device, &layInfo, nullptr, &blurDescriptorSetLayout);
-
-        // 체인 입력용 1개 + 밉 단계마다 1개. 밉 수는 해상도에 따라 변하므로 최대치로 잡아둔다.
-        {
-            std::vector<VkDescriptorSetLayout> layouts(BLOOM_MAX_MIPS + 1, blurDescriptorSetLayout);
-            std::vector<VkDescriptorSet> sets(BLOOM_MAX_MIPS + 1);
-            VkDescriptorSetAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            aInfo.descriptorPool = descriptorPool; aInfo.descriptorSetCount = (uint32_t)layouts.size(); aInfo.pSetLayouts = layouts.data();
-            vkAllocateDescriptorSets(device, &aInfo, sets.data());
-            bloomSrcSet = sets[0];
-            for (int i = 0; i < BLOOM_MAX_MIPS; ++i) bloomMipSets[i] = sets[i + 1];
-        }
-
-        updateBlurDescriptorSets();
-
-        VkPushConstantRange pc{}; pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pc.offset = 0; pc.size = sizeof(BloomPush);
-        VkPipelineLayoutCreateInfo pLayInfo{}; pLayInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayInfo.setLayoutCount = 1; pLayInfo.pSetLayouts = &blurDescriptorSetLayout; pLayInfo.pushConstantRangeCount = 1; pLayInfo.pPushConstantRanges = &pc;
-        vkCreatePipelineLayout(device, &pLayInfo, nullptr, &blurPipelineLayout);
-
-        auto vCode = readFile("shaders/post_vert.spv");
-        auto fDownCode = readFile("shaders/bloom_down_frag.spv");
-        auto fUpCode = readFile("shaders/bloom_up_frag.spv");
-        VkShaderModule vMod = createShaderModule(vCode);
-        VkShaderModule fMod = createShaderModule(fDownCode);
-        VkShaderModule fUpMod = createShaderModule(fUpCode);
-        VkPipelineShaderStageCreateInfo vS{}; vS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vS.stage = VK_SHADER_STAGE_VERTEX_BIT; vS.module = vMod; vS.pName = "main";
-        VkPipelineShaderStageCreateInfo fS{}; fS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fS.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fS.module = fMod; fS.pName = "main";
-        VkPipelineShaderStageCreateInfo sS[] = {vS, fS};
-
-        VkPipelineVertexInputStateCreateInfo vI{}; vI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        VkPipelineInputAssemblyStateCreateInfo iA{}; iA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; iA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        VkViewport vp{}; vp.width = swapChainExtent.width; vp.height = swapChainExtent.height; vp.maxDepth = 1.0f; VkRect2D sc{}; sc.extent = swapChainExtent;
-        VkPipelineViewportStateCreateInfo vpS{}; vpS.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vpS.viewportCount = 1; vpS.pViewports = &vp; vpS.scissorCount = 1; vpS.pScissors = &sc;
-        std::array<VkDynamicState, 2> dynamicStatesBlur = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        VkPipelineDynamicStateCreateInfo dynamicStateBlur{}; dynamicStateBlur.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dynamicStateBlur.dynamicStateCount = static_cast<uint32_t>(dynamicStatesBlur.size()); dynamicStateBlur.pDynamicStates = dynamicStatesBlur.data();
-        VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.lineWidth = 1.0f; rs.cullMode = VK_CULL_MODE_NONE;
-        VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        VkPipelineDepthStencilStateCreateInfo ds{}; ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; ds.depthTestEnable = VK_FALSE;
-        VkPipelineColorBlendAttachmentState cbA{}; cbA.colorWriteMask = 0xF; cbA.blendEnable = VK_FALSE;
-        VkPipelineColorBlendStateCreateInfo cbS{}; cbS.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbS.attachmentCount = 1; cbS.pAttachments = &cbA;
-
-        VkGraphicsPipelineCreateInfo pInfo{}; pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; pInfo.stageCount = 2; pInfo.pStages = sS; pInfo.pVertexInputState = &vI; pInfo.pInputAssemblyState = &iA; pInfo.pViewportState = &vpS; pInfo.pRasterizationState = &rs; pInfo.pMultisampleState = &ms; pInfo.pDepthStencilState = &ds; pInfo.pColorBlendState = &cbS; pInfo.layout = blurPipelineLayout; pInfo.renderPass = blurRenderPass; pInfo.pDynamicState = &dynamicStateBlur;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pInfo, nullptr, &bloomDownPipeline);
-
-        // 업샘플은 같은 상태에 가산 블렌딩(ONE/ONE)만 켜서, 확대한 결과를 아래 밉에 더한다.
-        VkPipelineColorBlendAttachmentState cbAdd = cbA;
-        cbAdd.blendEnable = VK_TRUE;
-        cbAdd.srcColorBlendFactor = VK_BLEND_FACTOR_ONE; cbAdd.dstColorBlendFactor = VK_BLEND_FACTOR_ONE; cbAdd.colorBlendOp = VK_BLEND_OP_ADD;
-        cbAdd.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cbAdd.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cbAdd.alphaBlendOp = VK_BLEND_OP_ADD;
-        VkPipelineColorBlendStateCreateInfo cbAddS = cbS; cbAddS.pAttachments = &cbAdd;
-
-        VkPipelineShaderStageCreateInfo fUpS = fS; fUpS.module = fUpMod;
-        VkPipelineShaderStageCreateInfo sUp[] = {vS, fUpS};
-        VkGraphicsPipelineCreateInfo pUp = pInfo;
-        pUp.pStages = sUp; pUp.pColorBlendState = &cbAddS; pUp.renderPass = bloomUpPass;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pUp, nullptr, &bloomUpPipeline);
-
-        vkDestroyShaderModule(device, fUpMod, nullptr); vkDestroyShaderModule(device, fMod, nullptr); vkDestroyShaderModule(device, vMod, nullptr);
-    }
-
-    void updatePostDescriptorSets() {
-        auto mI = [&](VkImageView v){ VkDescriptorImageInfo i{}; i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; i.imageView = v; i.sampler = offscreenSampler; return i; };
-        // 블룸 결과는 체인을 다 올라온 밉 0에 모여 있다.
-        VkDescriptorImageInfo cI = mI(offscreenColorView); VkDescriptorImageInfo brI = mI(bloomMipViews[0]);
-        std::array<VkWriteDescriptorSet, 2> wr{};
-        wr[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[0].dstSet = postDescriptorSet; wr[0].dstBinding = 0; wr[0].descriptorCount = 1; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[0].pImageInfo = &cI;
-        wr[1] = wr[0]; wr[1].dstBinding = 1; wr[1].pImageInfo = &brI;
-        vkUpdateDescriptorSets(device, 2, wr.data(), 0, nullptr);
-    }
-
-    void createPostProcessPipeline() {
-        std::array<VkDescriptorSetLayoutBinding, 2> b{};
-        b[0].binding = 0; b[0].descriptorCount = 1; b[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        b[1].binding = 1; b[1].descriptorCount = 1; b[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        VkDescriptorSetLayoutCreateInfo layInfo{}; layInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layInfo.bindingCount = 2; layInfo.pBindings = b.data();
-        vkCreateDescriptorSetLayout(device, &layInfo, nullptr, &postDescriptorSetLayout);
-
-        VkDescriptorSetAllocateInfo aInfo{}; aInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; aInfo.descriptorPool = descriptorPool; aInfo.descriptorSetCount = 1; aInfo.pSetLayouts = &postDescriptorSetLayout;
-        vkAllocateDescriptorSets(device, &aInfo, &postDescriptorSet);
-
-        updatePostDescriptorSets();
-
-        VkPushConstantRange postPcRange{}; postPcRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; postPcRange.offset = 0; postPcRange.size = sizeof(float);
-        VkPipelineLayoutCreateInfo pLayInfo{}; pLayInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pLayInfo.setLayoutCount = 1; pLayInfo.pSetLayouts = &postDescriptorSetLayout; pLayInfo.pushConstantRangeCount = 1; pLayInfo.pPushConstantRanges = &postPcRange;
-        vkCreatePipelineLayout(device, &pLayInfo, nullptr, &postPipelineLayout);
-
-        auto vCode = readFile("shaders/post_vert.spv"); auto fCode = readFile("shaders/post_frag.spv");
-        VkShaderModule vMod = createShaderModule(vCode); VkShaderModule fMod = createShaderModule(fCode);
-        VkPipelineShaderStageCreateInfo vS{}; vS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vS.stage = VK_SHADER_STAGE_VERTEX_BIT; vS.module = vMod; vS.pName = "main";
-        VkPipelineShaderStageCreateInfo fS{}; fS.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fS.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fS.module = fMod; fS.pName = "main";
-        VkPipelineShaderStageCreateInfo sS[] = {vS, fS};
-
-        VkPipelineVertexInputStateCreateInfo vI{}; vI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        VkPipelineInputAssemblyStateCreateInfo iA{}; iA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; iA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        VkViewport vp{}; vp.width = swapChainExtent.width; vp.height = swapChainExtent.height; vp.maxDepth = 1.0f; VkRect2D sc{}; sc.extent = swapChainExtent;
-        VkPipelineViewportStateCreateInfo vpS{}; vpS.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vpS.viewportCount = 1; vpS.pViewports = &vp; vpS.scissorCount = 1; vpS.pScissors = &sc;
-        std::array<VkDynamicState, 2> dynamicStatesPost = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        VkPipelineDynamicStateCreateInfo dynamicStatePost{}; dynamicStatePost.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dynamicStatePost.dynamicStateCount = static_cast<uint32_t>(dynamicStatesPost.size()); dynamicStatePost.pDynamicStates = dynamicStatesPost.data();
-        VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.lineWidth = 1.0f; rs.cullMode = VK_CULL_MODE_NONE;
-        VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        VkPipelineDepthStencilStateCreateInfo ds{}; ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; ds.depthTestEnable = VK_FALSE;
-        VkPipelineColorBlendAttachmentState cbA{}; cbA.colorWriteMask = 0xF; cbA.blendEnable = VK_FALSE;
-        VkPipelineColorBlendStateCreateInfo cbS{}; cbS.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbS.attachmentCount = 1; cbS.pAttachments = &cbA;
-
-        VkGraphicsPipelineCreateInfo pInfo{}; pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; pInfo.stageCount = 2; pInfo.pStages = sS; pInfo.pVertexInputState = &vI; pInfo.pInputAssemblyState = &iA; pInfo.pViewportState = &vpS; pInfo.pRasterizationState = &rs; pInfo.pMultisampleState = &ms; pInfo.pDepthStencilState = &ds; pInfo.pColorBlendState = &cbS; pInfo.layout = postPipelineLayout; pInfo.renderPass = renderPass; pInfo.pDynamicState = &dynamicStatePost;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pInfo, nullptr, &postPipeline);
-        vkDestroyShaderModule(device, fMod, nullptr); vkDestroyShaderModule(device, vMod, nullptr);
-    }
+    void createPostProcessPipeline();
 
     // 렌더러가 그리는 좌표계로 월드 좌표를 옮긴다. 모든 모델 행렬/UBO 좌표/피킹이 이 함수를 거친다.
     // 뺄셈을 double로 해야 하는 이유: 리얼 스케일에서 두 항이 모두 46000 수준이라 float32로 빼면
@@ -2164,94 +1762,13 @@ protected:
     }
 
 private:
-    void createColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a, VkImage &image, VkDeviceMemory &imageMemory, VkImageView &imageView, VkFormat format) {
-        uint8_t pixels[4] = {r, g, b, a}; VkDeviceSize imageSize = 4; VkBuffer stagingBuffer; VkDeviceMemory stagingBufferMemory;
-        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-        void *data; vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data); memcpy(data, pixels, static_cast<size_t>(imageSize)); vkUnmapMemory(device, stagingBufferMemory);
-        createImage(1, 1, format, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, image, imageMemory);
-        transitionImageLayout(image, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        copyBufferToImage(stagingBuffer, image, 1, 1);
-        transitionImageLayout(image, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
-        imageView = createImageView(image, format, VK_IMAGE_ASPECT_COLOR_BIT);
-    }
+    void createColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a, VkImage &image, VkDeviceMemory &imageMemory, VkImageView &imageView, VkFormat format);
     // 블록 압축 DDS(BC7 색상, BC5 법선)를 읽어 압축된 블록을 그대로 GPU에 올린다.
     //
     // texconv가 내는 DDS는 헤더 124바이트 + DX10 확장 20바이트 뒤에 밉 레벨이 큰 것부터
     // 차례로 붙어 있다. 블록 압축이라 한 레벨의 크기는 4로 올림한 블록 수 x 16바이트다.
     // GPU가 그 포맷을 못 쓰면 VK_NULL_HANDLE을 돌려 호출자가 원본 이미지로 물러나게 한다.
-    VkImageView loadDDS(const std::string &path, bool srgb) {
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        if (!f) return VK_NULL_HANDLE;
-        std::vector<uint8_t> buf(static_cast<size_t>(f.tellg()));
-        f.seekg(0); f.read(reinterpret_cast<char *>(buf.data()), buf.size());
-        if (buf.size() < 148 || memcmp(buf.data(), "DDS ", 4) != 0) return VK_NULL_HANDLE;
-
-        auto u32 = [&](size_t o) { uint32_t v; memcpy(&v, buf.data() + o, 4); return v; };
-        uint32_t height = u32(12), width = u32(16), mips = u32(28);
-        bool dx10 = memcmp(buf.data() + 84, "DX10", 4) == 0;
-        if (!dx10) return VK_NULL_HANDLE;              // BC7/BC5는 DX10 확장 헤더로만 표현된다
-        uint32_t dxgi = u32(128);
-        if (mips == 0) mips = 1;
-
-        // 색공간은 호출자가 정한다(DDS 태그가 아니라 슬롯의 용도가 기준이다). BC5는
-        // 법선 전용이라 언제나 선형이다.
-        VkFormat format;
-        if (dxgi == 98 || dxgi == 99)                  // 98=BC7_UNORM, 99=BC7_UNORM_SRGB
-            format = srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
-        else if (dxgi == 83)                           // 83=BC5_UNORM
-            format = VK_FORMAT_BC5_UNORM_BLOCK;
-        else
-            return VK_NULL_HANDLE;
-        VkFormatProperties props;
-        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
-        if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
-            static bool warned = false;
-            if (!warned) { std::cerr << "이 GPU는 블록 압축 텍스처를 지원하지 않습니다. 원본을 씁니다.\n"; warned = true; }
-            return VK_NULL_HANDLE;
-        }
-
-        const size_t dataOffset = 148;                  // 4 + 124 + 20
-        std::vector<VkBufferImageCopy> regions;
-        size_t offset = dataOffset;
-        for (uint32_t m = 0; m < mips; ++m) {
-            uint32_t w = std::max(1u, width >> m), h = std::max(1u, height >> m);
-            size_t bytes = static_cast<size_t>((w + 3) / 4) * ((h + 3) / 4) * 16;
-            if (offset + bytes > buf.size()) { mips = m; break; }   // 잘린 파일은 있는 데까지만
-            VkBufferImageCopy r{};
-            r.bufferOffset = offset - dataOffset;
-            r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1};
-            r.imageExtent = {w, h, 1};
-            regions.push_back(r);
-            offset += bytes;
-        }
-        if (regions.empty()) return VK_NULL_HANDLE;
-
-        VkDeviceSize total = offset - dataOffset;
-        VkBuffer staging; VkDeviceMemory stagingMem;
-        createBuffer(total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                     staging, stagingMem);
-        void *dst; vkMapMemory(device, stagingMem, 0, total, 0, &dst);
-        memcpy(dst, buf.data() + dataOffset, static_cast<size_t>(total));
-        vkUnmapMemory(device, stagingMem);
-
-        VkImage img; VkDeviceMemory mem;
-        createImage(width, height, format, VK_IMAGE_TILING_OPTIMAL,
-                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, img, mem, mips);
-        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, mips);
-        VkCommandBuffer cb = beginSingleTimeCommands();
-        vkCmdCopyBufferToImage(cb, staging, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                               static_cast<uint32_t>(regions.size()), regions.data());
-        endSingleTimeCommands(cb);
-        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1, mips);
-        vkDestroyBuffer(device, staging, nullptr); vkFreeMemory(device, stagingMem, nullptr);
-
-        VkImageView view = createImageView(img, format, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, 1, mips);
-        allImages.push_back(img); allMemories.push_back(mem); allViews.push_back(view);
-        return view;
-    }
+    VkImageView loadDDS(const std::string &path, bool srgb);
 
     // BC7로 미리 압축해 둔 .dds가 옆에 있으면 그것을 쓴다.
     //
@@ -2261,89 +1778,15 @@ private:
     // 블록당 대표색 2개를 잇는 직선으로 근사되지 않아 오차가 커진다.
     //
     // 압축 포맷은 blit으로 밉맵을 만들 수 없으므로 texconv가 구울 때 함께 넣어 둔다.
-    static std::string ddsPathFor(const std::string &path) {
-        size_t dot = path.find_last_of('.');
-        return (dot == std::string::npos) ? path + ".dds" : path.substr(0, dot) + ".dds";
-    }
+    static std::string ddsPathFor(const std::string &path);
 
-    VkImageView loadTexture(const std::string &path, VkFormat format) {
-        if (path.empty()) return (format == VK_FORMAT_R8G8B8A8_UNORM) ? viewDummyFlatNormal : viewDummyBlack;
-
-        std::string dds = ddsPathFor(path);
-        if (std::ifstream(dds, std::ios::binary).good()) {
-            VkImageView v = loadDDS(dds, format == VK_FORMAT_R8G8B8A8_SRGB);
-            if (v != VK_NULL_HANDLE) return v;
-            std::cerr << "DDS 로드 실패, 원본으로 대체: " << dds << "\n";
-        }
-
-        VkImage img; VkDeviceMemory mem; VkImageView view; int texWidth, texHeight, texChannels;
-        stbi_uc *pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-        if (!pixels) { std::cerr << "텍스처 없음, 더미 사용: " << path << std::endl; return viewDummyBlack; }
-        VkDeviceSize imageSize = texWidth * texHeight * 4; VkBuffer stagingBuffer; VkDeviceMemory stagingBufferMemory;
-        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-        void *data; vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data); memcpy(data, pixels, static_cast<size_t>(imageSize)); vkUnmapMemory(device, stagingBufferMemory);
-        stbi_image_free(pixels);
-        // 밉맵 체인. 8K 텍스처가 화면에서 수백 픽셀로 축소되면 밉맵 없이는 텍스처 캐시가
-        // 거의 매번 빗나가고 축소 지글거림(shimmering)도 생긴다. blit이 안 되는 포맷이면
-        // 레벨 1개로 물러난다(기존 동작과 동일).
-        uint32_t mipLevels = 1;
-        if (supportsLinearBlit(format))
-            mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
-
-        VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        if (mipLevels > 1) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // blit 소스로도 쓰인다
-        createImage(texWidth, texHeight, format, VK_IMAGE_TILING_OPTIMAL, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, img, mem, mipLevels);
-        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, mipLevels);
-        copyBufferToImage(stagingBuffer, img, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-        if (mipLevels > 1)
-            generateMipmaps(img, texWidth, texHeight, mipLevels); // 전 레벨을 SHADER_READ_ONLY로 남긴다
-        else
-            transitionImageLayout(img, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
-        view = createImageView(img, format, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, 1, mipLevels);
-        allImages.push_back(img); allMemories.push_back(mem); allViews.push_back(view); return view;
-    }
+    VkImageView loadTexture(const std::string &path, VkFormat format);
 
     // 모노크롬 UI 아이콘 로더. 형태는 PNG의 알파 채널이 정의하고(배경/중앙은 alpha=0으로 투명),
     // 색은 지정한 회색으로 통일한다. 원본 획이 검정이라 ImGui tint(곱셈)로는 밝게 만들 수 없어
     // RGB를 직접 덮어쓴다. 512px 원본을 40px 버튼에 밉맵 없이 축소하면 얇은 획이 계단현상을
     // 일으키므로, CPU 박스 평균으로 64x64로 먼저 줄여 알파 기반 안티앨리어싱을 확보한다.
-    VkImageView loadGrayIcon(const std::string &path, uint8_t gray) {
-        int sw, sh, ch;
-        stbi_uc *src = stbi_load(path.c_str(), &sw, &sh, &ch, STBI_rgb_alpha);
-        if (!src) { std::cerr << "아이콘 없음: " << path << "\n"; return VK_NULL_HANDLE; }
-
-        const int tw = 64, th = 64;
-        std::vector<uint8_t> dst(tw * th * 4);
-        for (int ty = 0; ty < th; ++ty) {
-            for (int tx = 0; tx < tw; ++tx) {
-                int x0 = tx * sw / tw, x1 = (tx + 1) * sw / tw;
-                int y0 = ty * sh / th, y1 = (ty + 1) * sh / th;
-                if (x1 <= x0) x1 = x0 + 1;
-                if (y1 <= y0) y1 = y0 + 1;
-                uint32_t aSum = 0, n = 0;
-                for (int y = y0; y < y1; ++y)
-                    for (int x = x0; x < x1; ++x) { aSum += src[(y * sw + x) * 4 + 3]; ++n; }
-                int di = (ty * tw + tx) * 4;
-                dst[di + 0] = gray; dst[di + 1] = gray; dst[di + 2] = gray;
-                dst[di + 3] = (uint8_t)(aSum / n);   // 다운스케일된 알파 = 부드러운 회색 기어 형태
-            }
-        }
-        stbi_image_free(src);
-
-        VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;   // 평면 UI 회색이라 sRGB 변환 없이 그대로 표시
-        VkDeviceSize imageSize = (VkDeviceSize)tw * th * 4; VkBuffer sb; VkDeviceMemory sbm;
-        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sbm);
-        void *data; vkMapMemory(device, sbm, 0, imageSize, 0, &data); memcpy(data, dst.data(), (size_t)imageSize); vkUnmapMemory(device, sbm);
-        VkImage img; VkDeviceMemory mem;
-        createImage(tw, th, format, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, img, mem);
-        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        copyBufferToImage(sb, img, (uint32_t)tw, (uint32_t)th);
-        transitionImageLayout(img, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        vkDestroyBuffer(device, sb, nullptr); vkFreeMemory(device, sbm, nullptr);
-        VkImageView view = createImageView(img, format, VK_IMAGE_ASPECT_COLOR_BIT);
-        allImages.push_back(img); allMemories.push_back(mem); allViews.push_back(view); return view;
-    }
+    VkImageView loadGrayIcon(const std::string &path, uint8_t gray);
 
     Planet createPlanet(std::string name, int typeId, float radius, float orbitRadius, float orbitSpeed, float eccentricity, float rotSpeed, float axialTilt, float orbIncl, float periAngle, float ascNode, float initAngle, float axisDir, bool hasClouds, std::string diffuse, std::string night, std::string spec, std::string normal, std::string clouds) {
         Planet p; p.name = name; p.typeId = typeId; p.radius = radius; p.orbitRadius = orbitRadius; p.orbitSpeed = orbitSpeed; p.eccentricity = eccentricity; p.rotationSpeed = rotSpeed; p.axialTilt = axialTilt; p.hasClouds = hasClouds;
@@ -2376,320 +1819,19 @@ private:
         vkUpdateDescriptorSets(device, 9, writes.data(), 0, nullptr); return p;
     }
 
-    void createDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 9> b{}; // 0=UBO, 1~6=텍스처, 7=소행성 SSBO, 8=은하수 층
-        for (int i = 0; i < 9; i++) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; }
-        b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; b[0].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
-        for (int i = 1; i < 7; i++) b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        b[4].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
+    void createDescriptorSetLayout();
 
-        // 7번 바인딩: 버텍스 셰이더가 읽는 소행성 인스턴스 버퍼(SSBO).
-        // 셰도우 맵이 쓰던 자리를 물려받았다.
-        b[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        b[7].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-        // 8번: 은하수 확산광 큐브맵. 밝은 별(6번)과 따로 둬야 둘을 독립적으로 조절할 수 있다.
-        b[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-
-        VkDescriptorSetLayoutCreateInfo layoutInfo{}; layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; layoutInfo.bindingCount = 9; layoutInfo.pBindings = b.data();
-        vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
-    }
-
-    void createDescriptorPool() {
-        std::array<VkDescriptorPoolSize, 3> poolSizes{};
-        // 천체가 늘어날 것에 대비해 내부 슬롯 용량도 빵빵하게 늘려줍니다.
-        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; poolSizes[0].descriptorCount = 100; 
-        poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; poolSizes[1].descriptorCount = 500; 
-        poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; poolSizes[2].descriptorCount = 100;
-
-        VkDescriptorPoolCreateInfo poolInfo{}; 
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; 
-        poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size()); 
-        poolInfo.pPoolSizes = poolSizes.data(); 
-        
-        // 🚀 [핵심 해결] 최대 세트 개수를 20개에서 100개로 대폭 확장합니다!
-        poolInfo.maxSets = 100; 
-        
-        vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool);
-    }
+    void createDescriptorPool();
 
     // BC6H로 미리 구운 큐브맵 DDS를 읽는다. 성공하면 true.
     //
     // BC6H는 HDR 전용 블록 압축이라 half 4채널을 픽셀당 1바이트로 담는다. 이게 없으면
     // 해상도 업그레이드가 성립하지 않는다 — 4096^2 x 6면을 fp16으로 올리면 805 MiB인데,
     // BC6H로는 밉맵까지 다 넣고도 128 MiB다(2048^2 fp16 무압축 192 MiB보다도 작다).
-    bool loadCubeDDS(const std::string &path, VkImage &outImg, VkDeviceMemory &outMem, VkImageView &outView) {
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        if (!f) return false;
-        std::vector<uint8_t> buf(static_cast<size_t>(f.tellg()));
-        f.seekg(0); f.read(reinterpret_cast<char *>(buf.data()), buf.size());
-        if (buf.size() < 148 || memcmp(buf.data(), "DDS ", 4) != 0) return false;
+    bool loadCubeDDS(const std::string &path, VkImage &outImg, VkDeviceMemory &outMem, VkImageView &outView);
 
-        auto u32 = [&](size_t o) { uint32_t v; memcpy(&v, buf.data() + o, 4); return v; };
-        uint32_t height = u32(12), width = u32(16), mips = u32(28);
-        if (memcmp(buf.data() + 84, "DX10", 4) != 0) return false;
-        uint32_t dxgi = u32(128), misc = u32(136);
-        if (mips == 0) mips = 1;
-        if (!(misc & 0x4)) { std::cerr << "스카이박스 DDS가 큐브맵이 아닙니다: " << path << "\n"; return false; }
-
-        VkFormat format;
-        if (dxgi == 95)      format = VK_FORMAT_BC6H_UFLOAT_BLOCK;   // 95 = BC6H_UF16
-        else if (dxgi == 96) format = VK_FORMAT_BC6H_SFLOAT_BLOCK;   // 96 = BC6H_SF16
-        else { std::cerr << "스카이박스 DDS의 포맷을 모릅니다(dxgi=" << dxgi << ")\n"; return false; }
-
-        VkFormatProperties props;
-        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
-        if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
-            std::cerr << "이 GPU는 BC6H를 지원하지 않습니다. EXR 스카이박스로 돌아갑니다.\n";
-            return false;
-        }
-
-        // DDS 큐브맵은 면이 바깥 루프다 — 면 0의 밉 전부, 면 1의 밉 전부, ... 순서로 놓인다.
-        const size_t dataOffset = 148;
-        std::vector<VkBufferImageCopy> regions;
-        size_t offset = dataOffset;
-        for (uint32_t face = 0; face < 6; ++face) {
-            for (uint32_t m = 0; m < mips; ++m) {
-                uint32_t w = std::max(1u, width >> m), h = std::max(1u, height >> m);
-                size_t bytes = static_cast<size_t>((w + 3) / 4) * ((h + 3) / 4) * 16;
-                if (offset + bytes > buf.size()) { std::cerr << "스카이박스 DDS가 잘렸습니다\n"; return false; }
-                VkBufferImageCopy r{};
-                r.bufferOffset = offset - dataOffset;
-                r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, m, face, 1};
-                r.imageExtent = {w, h, 1};
-                regions.push_back(r);
-                offset += bytes;
-            }
-        }
-
-        VkDeviceSize total = offset - dataOffset;
-        VkBuffer staging; VkDeviceMemory stagingMem;
-        createBuffer(total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                     staging, stagingMem);
-        void *dst; vkMapMemory(device, stagingMem, 0, total, 0, &dst);
-        memcpy(dst, buf.data() + dataOffset, static_cast<size_t>(total));
-        vkUnmapMemory(device, stagingMem);
-
-        VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        ii.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; ii.imageType = VK_IMAGE_TYPE_2D;
-        ii.extent = {width, height, 1}; ii.mipLevels = mips; ii.arrayLayers = 6;
-        ii.format = format; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        vkCreateImage(device, &ii, nullptr, &outImg);
-        VkMemoryRequirements mr; vkGetImageMemoryRequirements(device, outImg, &mr);
-        VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        ai.allocationSize = mr.size; ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        vkAllocateMemory(device, &ai, nullptr, &outMem); vkBindImageMemory(device, outImg, outMem, 0);
-
-        transitionImageLayout(outImg, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 6, mips);
-        VkCommandBuffer cb = beginSingleTimeCommands();
-        vkCmdCopyBufferToImage(cb, staging, outImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                               static_cast<uint32_t>(regions.size()), regions.data());
-        endSingleTimeCommands(cb);
-        transitionImageLayout(outImg, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 6, mips);
-        vkDestroyBuffer(device, staging, nullptr); vkFreeMemory(device, stagingMem, nullptr);
-
-        outView = createImageView(outImg, format, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_CUBE, 6, mips);
-        std::cout << "[skybox] " << path << "  " << width << "x" << height
-                  << " x6, 밉 " << mips << ", " << (total / 1048576) << " MiB\n";
-        return true;
-    }
-
-    void createCubeTextureImage() {
-        // 실측 성도(NASA Deep Star Maps 2020)를 두 층으로 나눠 구워 둔 것이 있으면 쓴다.
-        //
-        //   skybox_stars = hiptyc   : 히파르코스/티코의 밝은 별만
-        //   skybox_band  = milkyway : 은하수 확산광 + 어두운 Gaia 별 전부
-        //
-        // 나눠야 하는 이유: 별 개수를 실제 하늘(전천 9,100개, 6.5등급)에 맞추는 원시값
-        // 문턱이 0.261인데 은하수 띠는 0.044라, 하나의 톤 곡선으로는 별 개수를 맞추는
-        // 순간 은하수가 사라진다. 점광원과 확산광은 눈의 검출 문턱이 다른데(띠는 넓어서
-        // 공간적으로 적분돼 보인다), 픽셀 단위 함수로는 그 차이를 표현할 수 없다.
-        if (loadCubeDDS("textures/skybox_stars.dds", texSkybox, memSkybox, viewSkybox) &&
-            loadCubeDDS("textures/skybox_band.dds", texSkyBand, memSkyBand, viewSkyBand))
-            return;
-
-        // 한쪽만 성공했으면 되돌린다. 두 층이 짝으로 있어야 셰이더 계수가 맞는다.
-        if (viewSkybox != VK_NULL_HANDLE) {
-            vkDestroyImageView(device, viewSkybox, nullptr); vkDestroyImage(device, texSkybox, nullptr); vkFreeMemory(device, memSkybox, nullptr);
-            viewSkybox = VK_NULL_HANDLE; texSkybox = VK_NULL_HANDLE; memSkybox = VK_NULL_HANDLE;
-        }
-
-        // 🚀 확장자를 .exr로 설정합니다! (textures 폴더 안에 6장의 EXR 파일이 있어야 합니다)
-        std::vector<std::string> cubeFaces = {
-            "textures/right.exr", "textures/left.exr", 
-            "textures/top.exr", "textures/bottom.exr", 
-            "textures/front.exr", "textures/back.exr"
-        };
-        
-        int texWidth = 0, texHeight = 0; 
-        
-        // 🚀 8비트 정수가 아닌 32비트 실수(float) 포인터 배열 사용
-        float *pixels[6]; 
-        const char* err = nullptr;
-
-        for (int i = 0; i < 6; i++) { 
-            int width, height;
-            // 🚀 tinyexr 라이브러리를 사용하여 EXR 파일 로드
-            int ret = LoadEXR(&pixels[i], &width, &height, cubeFaces[i].c_str(), &err);
-            
-            if (ret != TINYEXR_SUCCESS) {
-                if (err) {
-                    std::string errorMsg = err;
-                    FreeEXRErrorMessage(err); // 에러 메시지 메모리 누수 방지
-                    throw std::runtime_error("EXR 로드 실패: " + cubeFaces[i] + " - " + errorMsg);
-                }
-                throw std::runtime_error("EXR 로드 실패: " + cubeFaces[i]);
-            }
-            
-            // 6면의 해상도가 같아야 하므로 첫 번째 파일의 해상도를 기준으로 삼음
-            if (i == 0) {
-                texWidth = width;
-                texHeight = height;
-            }
-        }
-        
-        // GPU에는 half(fp16) 4채널로 올린다. EXR 원본의 채널 타입이 이미 HALF이므로
-        // fp32로 올리면 없는 정밀도를 채우려고 VRAM만 2배 쓴다(2048^2 x 6면 기준 402 MiB).
-        // tinyexr의 LoadEXR은 무조건 float로 풀어 주므로 여기서 다시 half로 접는다.
-        VkDeviceSize srcLayerFloats = static_cast<VkDeviceSize>(texWidth) * static_cast<VkDeviceSize>(texHeight) * 4ull;
-        VkDeviceSize layerSize = srcLayerFloats * sizeof(uint16_t);
-        VkDeviceSize imageSize = layerSize * 6;
-        
-        VkBuffer stagingBuffer; VkDeviceMemory stagingBufferMemory;
-        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-        void *data; 
-        vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-        
-        // 진단: half로 접었다 편 값이 원본과 얼마나 다른지 잰다. EXR 원본의 채널 타입이
-        // HALF이므로 이론상 오차가 0이어야 하고, 0이 아니면 어딘가 잘못된 것이다.
-        double maxAbsErr = 0.0, maxOrig = 0.0; VkDeviceSize nonZeroDiff = 0;
-
-        for (int i = 0; i < 6; i++) {
-            // packHalf2x16은 float 두 개를 half 두 개로 접어 uint32 하나에 담는다.
-            // (r,g)와 (b,a)를 각각 한 번씩 접으면 픽셀당 16바이트가 8바이트가 된다.
-            uint32_t *dst = reinterpret_cast<uint32_t *>(static_cast<char *>(data) + layerSize * i);
-            const float *src = pixels[i];
-            for (VkDeviceSize p = 0; p < srcLayerFloats; p += 4) {
-                dst[0] = glm::packHalf2x16(glm::vec2(src[p + 0], src[p + 1]));
-                dst[1] = glm::packHalf2x16(glm::vec2(src[p + 2], src[p + 3]));
-                if (profiler.devTools()) {   // 검증은 SOLAR_PROFILE=1일 때만 (2500만 픽셀을 한 번 더 훑는다)
-                    glm::vec2 rg = glm::unpackHalf2x16(dst[0]), ba = glm::unpackHalf2x16(dst[1]);
-                    float back[4] = {rg.x, rg.y, ba.x, ba.y};
-                    for (int c = 0; c < 4; ++c) {
-                        double d = std::fabs((double)back[c] - (double)src[p + c]);
-                        if (d > 0.0) ++nonZeroDiff;
-                        maxAbsErr = std::max(maxAbsErr, d);
-                        maxOrig = std::max(maxOrig, (double)src[p + c]);
-                    }
-                }
-                dst += 2;
-            }
-            // 🚀 tinyexr은 내부적으로 malloc을 쓰기 때문에 반드시 free()로 메모리를 해제해야 합니다.
-            free(pixels[i]);
-        }
-        if (profiler.devTools())
-            std::cout << "[skybox] fp16 변환 검증: 원본 최대값=" << maxOrig
-                      << "  최대 절대오차=" << maxAbsErr
-                      << "  값이 달라진 채널 수=" << nonZeroDiff
-                      << " / " << (srcLayerFloats * 6) << std::endl;
-        vkUnmapMemory(device, stagingBufferMemory);
-        
-        // 🚀 [핵심] Vulkan 이미지 포맷을 실수형(SFLOAT)으로 변경하여 빛의 다이나믹 레인지를 보존합니다.
-        // R16G16B16A16_SFLOAT은 Vulkan이 SAMPLED_IMAGE와 선형 필터링을 필수로 보장하는
-        // 포맷이라 별도 지원 확인 없이 써도 된다.
-        VkFormat hdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-
-        // 진단: 예전에 쓰던 fp32가 이 장치에서 선형 필터링을 지원했는지 확인한다.
-        // 32비트 실수 포맷은 SAMPLED_IMAGE_FILTER_LINEAR이 필수가 아니라, 지원하지 않는
-        // 장치에서는 샘플러가 LINEAR로 설정돼 있어도 사실상 최근접으로 동작한다.
-        // 그러면 fp16으로 바꾼 순간 필터링이 '처음으로' 켜지면서 별 모양이 달라 보인다.
-        for (auto [fmt, name] : { std::pair<VkFormat, const char*>{VK_FORMAT_R32G32B32A32_SFLOAT, "R32G32B32A32_SFLOAT"},
-                                  {VK_FORMAT_R16G16B16A16_SFLOAT, "R16G16B16A16_SFLOAT"} }) {
-            VkFormatProperties fp{}; vkGetPhysicalDeviceFormatProperties(physicalDevice, fmt, &fp);
-            std::cout << "[skybox] " << name
-                      << "  sampled=" << ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ? 1 : 0)
-                      << "  linearFilter=" << ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ? 1 : 0)
-                      << "\n";
-        }
-        
-        VkImageCreateInfo imageInfo{}; imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; imageInfo.imageType = VK_IMAGE_TYPE_2D; imageInfo.extent.width = texWidth; imageInfo.extent.height = texHeight; imageInfo.extent.depth = 1; imageInfo.mipLevels = 1; imageInfo.arrayLayers = 6; 
-        imageInfo.format = hdrFormat; // 새로운 HDR 포맷 적용
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL; imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; imageInfo.samples = VK_SAMPLE_COUNT_1_BIT; imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        vkCreateImage(device, &imageInfo, nullptr, &texSkybox);
-        
-        VkMemoryRequirements memReqs; vkGetImageMemoryRequirements(device, texSkybox, &memReqs); 
-        VkMemoryAllocateInfo allocInfo{}; allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; allocInfo.allocationSize = memReqs.size; allocInfo.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        vkAllocateMemory(device, &allocInfo, nullptr, &memSkybox); vkBindImageMemory(device, texSkybox, memSkybox, 0);
-        
-        transitionImageLayout(texSkybox, hdrFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 6);
-        
-        VkCommandBuffer cb = beginSingleTimeCommands();
-        std::vector<VkBufferImageCopy> bufferCopyRegions;
-        for (uint32_t face = 0; face < 6; face++) { 
-            VkBufferImageCopy region{}; region.bufferOffset = layerSize * face; region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; region.imageSubresource.mipLevel = 0; region.imageSubresource.baseArrayLayer = face; region.imageSubresource.layerCount = 1; region.imageExtent = {(uint32_t)texWidth, (uint32_t)texHeight, 1}; 
-            bufferCopyRegions.push_back(region); 
-        }
-        vkCmdCopyBufferToImage(cb, stagingBuffer, texSkybox, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, bufferCopyRegions.size(), bufferCopyRegions.data());
-        endSingleTimeCommands(cb);
-        
-        transitionImageLayout(texSkybox, hdrFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 6);
-        
-        vkDestroyBuffer(device, stagingBuffer, nullptr); vkFreeMemory(device, stagingBufferMemory, nullptr);
-        
-        viewSkybox = createImageView(texSkybox, hdrFormat, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_CUBE, 6);
-    }
-    void createGraphicsPipeline() {
-        auto vertShaderCode = readFile("shaders/vert.spv"); auto fragShaderCode = readFile("shaders/frag.spv");
-        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode); VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
-        VkPipelineShaderStageCreateInfo vertShaderStageInfo{}; vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT; vertShaderStageInfo.module = vertShaderModule; vertShaderStageInfo.pName = "main";
-        VkPipelineShaderStageCreateInfo fragShaderStageInfo{}; fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fragShaderStageInfo.module = fragShaderModule; fragShaderStageInfo.pName = "main";
-        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
-        auto bindingDescription = Vertex::getBindingDescription(); auto attributeDescriptions = Vertex::getAttributeDescriptions();
-        VkPipelineVertexInputStateCreateInfo vertexInputInfo{}; vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO; vertexInputInfo.vertexBindingDescriptionCount = 1; vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size()); vertexInputInfo.pVertexBindingDescriptions = &bindingDescription; vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
-        VkPipelineInputAssemblyStateCreateInfo inputAssembly{}; inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        VkViewport viewport{}; viewport.width = (float)swapChainExtent.width; viewport.height = (float)swapChainExtent.height; viewport.maxDepth = 1.0f; VkRect2D scissor{}; scissor.extent = swapChainExtent;
-        VkPipelineViewportStateCreateInfo viewportState{}; viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; viewportState.viewportCount = 1; viewportState.pViewports = &viewport; viewportState.scissorCount = 1; viewportState.pScissors = &scissor;
-        std::array<VkDynamicState, 2> dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        VkPipelineDynamicStateCreateInfo dynamicState{}; dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()); dynamicState.pDynamicStates = dynamicStates.data();
-        VkPipelineRasterizationStateCreateInfo rasterizer{}; rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rasterizer.polygonMode = VK_POLYGON_MODE_FILL; rasterizer.lineWidth = 1.0f; rasterizer.cullMode = VK_CULL_MODE_NONE; rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        // 오프스크린 패스가 MSAA이므로 여기 그리는 두 파이프라인(graphics/line)의 샘플 수도 일치시켜야 한다.
-        VkPipelineMultisampleStateCreateInfo multisampling{}; multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; multisampling.rasterizationSamples = msaaSamples;
-        VkPipelineDepthStencilStateCreateInfo depthStencil{}; depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; depthStencil.depthTestEnable = VK_TRUE; depthStencil.depthWriteEnable = VK_TRUE; depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-        
-        VkPipelineColorBlendAttachmentState colorBlendAttachment[2]{};
-        colorBlendAttachment[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT; colorBlendAttachment[0].blendEnable = VK_TRUE; colorBlendAttachment[0].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; colorBlendAttachment[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; colorBlendAttachment[0].colorBlendOp = VK_BLEND_OP_ADD;
-        colorBlendAttachment[1] = colorBlendAttachment[0]; 
-
-        VkPipelineColorBlendStateCreateInfo colorBlending{}; colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; colorBlending.attachmentCount = 2; colorBlending.pAttachments = colorBlendAttachment;
-
-        VkPushConstantRange pushConstantRange{}; pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pushConstantRange.offset = 0; pushConstantRange.size = sizeof(PushConstants);
-        VkPipelineLayoutCreateInfo pipelineLayoutInfo{}; pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pipelineLayoutInfo.setLayoutCount = 1; pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout; pipelineLayoutInfo.pushConstantRangeCount = 1; pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
-        vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
-        
-        VkGraphicsPipelineCreateInfo pipelineInfo{}; pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; pipelineInfo.stageCount = 2; pipelineInfo.pStages = shaderStages; pipelineInfo.pVertexInputState = &vertexInputInfo; pipelineInfo.pInputAssemblyState = &inputAssembly; pipelineInfo.pViewportState = &viewportState; pipelineInfo.pRasterizationState = &rasterizer; pipelineInfo.pMultisampleState = &multisampling; pipelineInfo.pDepthStencilState = &depthStencil; pipelineInfo.pColorBlendState = &colorBlending; pipelineInfo.layout = pipelineLayout; pipelineInfo.renderPass = offscreenRenderPass; pipelineInfo.pDynamicState = &dynamicState;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline);
-
-        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &linePipeline);
-
-        // 대기 껍질용. 두 가지만 다르다.
-        // - 깊이를 쓰지 않는다: 껍질은 행성보다 커서, 깊이를 남기면 나중에 그리는 위성이나
-        //   궤도선이 그 뒤로 사라져 버린다. 읽기는 그대로 해야 앞의 물체에 가려진다.
-        // - 가산 블렌딩: 산란광은 뒤를 가리는 게 아니라 빛을 더하는 것이다.
-        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        depthStencil.depthWriteEnable = VK_FALSE;
-        colorBlendAttachment[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-        colorBlendAttachment[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-        colorBlendAttachment[1].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-        colorBlendAttachment[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &atmospherePipeline);
-
-        vkDestroyShaderModule(device, fragShaderModule, nullptr); vkDestroyShaderModule(device, vertShaderModule, nullptr);
-    }
+    void createCubeTextureImage();
+    void createGraphicsPipeline();
 
     // 고정된 천체의 궤도를 double로 계산해 카메라 상대 좌표 정점으로 굽는다.
     // 궤도 자체는 부모(태양 또는 모행성) 기준이므로 부모 위치를 더해 월드 좌표를 만든 뒤 상대화한다.
@@ -2731,52 +1873,12 @@ private:
         lockedOrbitValid = true;
     }
 
-    void createLockedOrbitBuffer() {
-        VkDeviceSize bufferSize = sizeof(Vertex) * (LOCKED_ORBIT_SEGMENTS + 1);
-        createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                     lockedOrbitBuffer, lockedOrbitMemory);
-        vkMapMemory(device, lockedOrbitMemory, 0, bufferSize, 0, &lockedOrbitMapped);
-    }
+    void createLockedOrbitBuffer();
 
-    void createVertexBuffer() {
-        VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
-        createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, vertexBuffer, vertexBufferMemory);
-        void *data;
-        vkMapMemory(device, vertexBufferMemory, 0, bufferSize, 0, &data);
-        memcpy(data, vertices.data(), (size_t)bufferSize);
-        vkUnmapMemory(device, vertexBufferMemory);
-    }
+    void createVertexBuffer();
 
-    void createIndexBuffer() {
-        VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
-        createBuffer(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, indexBuffer, indexBufferMemory);
-        void *data;
-        vkMapMemory(device, indexBufferMemory, 0, bufferSize, 0, &data);
-        memcpy(data, indices.data(), (size_t)bufferSize);
-        vkUnmapMemory(device, indexBufferMemory);
-    }
+    void createIndexBuffer();
 
-    void createUniformBuffer() { VkDeviceSize bufferSize = sizeof(UniformBufferObject); createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffer, uniformBufferMemory); vkMapMemory(device, uniformBufferMemory, 0, bufferSize, 0, &uniformBufferMapped); }
-    void createTextureSampler() {
-        // 이방성 필터링은 디바이스 기능으로 이미 켜져 있다(createLogicalDevice의 samplerAnisotropy).
-        // 구체에 감긴 텍스처는 시선이 비스듬히 닿는 가장자리에서 특히 뭉개지므로 효과가 크다.
-        VkPhysicalDeviceProperties devProps{};
-        vkGetPhysicalDeviceProperties(physicalDevice, &devProps);
-
-        VkSamplerCreateInfo samplerInfo{}; samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerInfo.magFilter = VK_FILTER_LINEAR; samplerInfo.minFilter = VK_FILTER_LINEAR;
-        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT; samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.anisotropyEnable = VK_TRUE;
-        // 8x와 16x는 눈으로 구분이 거의 안 되는데 페치 비용은 두 배 차이다.
-        // 성능이 아쉬우면 이 숫자를 4.0f로 내리거나 anisotropyEnable을 끄면 된다.
-        samplerInfo.maxAnisotropy = std::min(8.0f, devProps.limits.maxSamplerAnisotropy);
-        samplerInfo.compareEnable = VK_FALSE;
-        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        // 밉 레벨이 1개뿐인 이미지(더미·UI 아이콘·스카이박스)는 뷰의 levelCount가 알아서
-        // 클램프하므로, 여기서 상한을 풀어도 안전하다.
-        samplerInfo.minLod = 0.0f;
-        samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
-        vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler);
-    }
+    void createUniformBuffer();
+    void createTextureSampler();
 };
