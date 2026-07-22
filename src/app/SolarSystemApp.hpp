@@ -4,6 +4,7 @@
 #include "../VulkanBase.hpp"
 #include "../Camera.hpp"
 #include "../core/Settings.hpp"
+#include "../core/GpuProfiler.hpp"
 
 #include <glm/gtc/packing.hpp>   // packHalf2x16: 스카이박스를 fp16으로 접어 올린다
 
@@ -230,13 +231,8 @@ private:
 
 protected:
     void onFrameStart() override {
-        if (profiling) {
-            double now = glfwGetTime();
-            if (tsLastFrameStart > 0.0) tsAccumCpuFrame += (now - tsLastFrameStart) * 1000.0;
-            tsLastFrameStart = now;
-            collectProfile();
-            ++tsFrameCount;
-        }
+        profiler.collect(device, asteroidTransforms.size());
+        profiler.beginFrame(glfwGetTime());
         // VSync 변경은 present mode만 바꾸면 되므로 스왑체인 재생성으로 처리.
         if (settings.vsync != appliedVsync) {
             appliedVsync = settings.vsync;
@@ -527,99 +523,11 @@ protected:
         return VK_SAMPLE_COUNT_1_BIT;
     }
 
-    // ── 성능 계측 (개발자 전용) ──────────────────────────────────────────
-    // SOLAR_PROFILE=1 환경변수를 주고 실행할 때만 켜진다. 배포판을 그냥 실행하면
-    // 타임스탬프도 안 찍고 설정 창에 항목도 나오지 않는다 — 최종 사용자에게 보여 줄
-    // 정보가 아니고, 오히려 해석을 틀리기 쉬운 숫자다(%는 다른 패스가 싸져도 오른다).
-    //
-    // 개발 중에는 scripts/run_dev.bat으로 실행하면 된다.
-    VkQueryPool tsPool = VK_NULL_HANDLE;
-    float tsPeriodNs = 0.0f;
-    bool devTools = false;        // SOLAR_PROFILE=1 인가 (계측 UI와 콘솔 출력의 관문)
-    bool profiling = false;       // 타임스탬프 기록 여부 (= devTools이고 장치가 지원하는가)
-    int tsFrameCount = 0;
-    double tsAccumCpuRecord = 0.0, tsAccumCpuFrame = 0.0, tsLastFrameStart = 0.0;
-    double tsAccumGpu[10] = {};
-    double tsSmoothGpu[10] = {};  // 오버레이용. 지수 평활이라 숫자가 떨리지 않는다.
-    VkDrawIndexedIndirectCommand lastDrawCmds[12] = {}; // 직전 프레임의 LOD 바구니 스냅샷
-    static const int TS_SLOTS = 11; // 0시작 1컴퓨트 2소행성 3행성 4은하 5궤도선 6태양 7블러 8포스트 9끝
-    static constexpr const char* TS_NAMES[10] = {
-        "compute", "asteroids", "bodies", "skybox", "galaxy+atmo",
-        "orbits", "sun", "blur", "post", "tail"
-    };
-
-    void initProfiling() {
-        const char* env = std::getenv("SOLAR_PROFILE");
-        devTools = (env && env[0] == '1');
-        if (!devTools) return;      // 배포 실행에서는 쿼리 풀조차 만들지 않는다
-
-        VkPhysicalDeviceProperties props{}; vkGetPhysicalDeviceProperties(physicalDevice, &props);
-        // 타임스탬프를 못 쓰는 큐가 있는 장치에서는 계측을 통째로 끈다.
-        if (props.limits.timestampPeriod == 0.0f || props.limits.timestampComputeAndGraphics == VK_FALSE) {
-            std::cout << "[profile] 이 장치는 타임스탬프 쿼리를 지원하지 않아 계측을 끕니다.\n";
-            return;
-        }
-        tsPeriodNs = props.limits.timestampPeriod;
-        VkQueryPoolCreateInfo qi{}; qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = TS_SLOTS;
-        if (vkCreateQueryPool(device, &qi, nullptr, &tsPool) != VK_SUCCESS) return;
-        profiling = true;
-        std::cout << "[profile] on. timestampPeriod=" << tsPeriodNs << " ns/tick\n";
-    }
-
-    // 직전 프레임의 타임스탬프를 읽어 누적한다(펜스 대기 후라 이미 준비돼 있다).
-    void collectProfile() {
-        if (!profiling || tsPool == VK_NULL_HANDLE || tsFrameCount == 0) return;
-        uint64_t ts[TS_SLOTS] = {};
-        if (vkGetQueryPoolResults(device, tsPool, 0, TS_SLOTS, sizeof(ts), ts, sizeof(uint64_t),
-                                  VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
-        // 슬롯이 11개면 구간은 10개다. 예전엔 11번 돌아 tsAccumGpu[10](크기 10)과
-        // ts[11]을 넘겨 읽고 썼다.
-        for (int i = 0; i < 10; ++i) {
-            double ms = (double)(ts[i + 1] - ts[i]) * tsPeriodNs / 1e6;
-            tsAccumGpu[i] += ms;
-            // 오버레이는 매 프레임 갱신되므로 그대로 쓰면 숫자가 읽을 수 없게 떨린다.
-            tsSmoothGpu[i] += (ms - tsSmoothGpu[i]) * 0.05;
-        }
-
-        if (devTools && tsFrameCount % 120 == 0) {
-            double n = 120.0;
-            const char* const* names = TS_NAMES;
-            std::cout << "[profile] frames=" << tsFrameCount
-                      << "  cpuFrame=" << (tsAccumCpuFrame / n) << "ms"
-                      << "  cpuRecord=" << (tsAccumCpuRecord / n) << "ms  | GPU: ";
-            double gpuTotal = 0;
-            for (int i = 0; i < 10; ++i) { std::cout << names[i] << "=" << (tsAccumGpu[i] / n) << " "; gpuTotal += tsAccumGpu[i] / n; }
-            std::cout << " gpuTotal=" << gpuTotal << "ms\n";
-
-            // 실제로 어느 LOD에 몇 개가 들어갔는지(updateUniformBuffer에서 떠 둔 스냅샷).
-            {
-                const VkDrawIndexedIndirectCommand* cmds = lastDrawCmds;
-                uint32_t perLod[3] = {}, tris[3] = {};
-                for (int lod = 0; lod < 3; ++lod)
-                    for (int type = 0; type < 4; ++type) {
-                        const auto& c = cmds[lod * 4 + type];
-                        perLod[lod] += c.instanceCount;
-                        tris[lod] += c.instanceCount * (c.indexCount / 3);
-                    }
-                std::cout << "[lodmix] LOD0=" << perLod[0] << " LOD1=" << perLod[1] << " LOD2=" << perLod[2]
-                          << " (전체 " << (perLod[0] + perLod[1] + perLod[2]) << "/" << asteroidTransforms.size() << ")"
-                          << "  삼각형: LOD0=" << tris[0] << " LOD1=" << tris[1] << " LOD2=" << tris[2]
-                          << " 합계=" << (tris[0] + tris[1] + tris[2]) << "\n";
-            }
-            std::cout << std::flush;
-        }
-        // 콘솔 출력 여부와 무관하게 120프레임마다 비운다. 예전엔 출력 블록 안에서만
-        // 비워서, 콘솔을 끄면 누적값이 영원히 자랐다.
-        if (tsFrameCount % 120 == 0) {
-            for (int i = 0; i < 10; ++i) tsAccumGpu[i] = 0.0;
-            tsAccumCpuRecord = tsAccumCpuFrame = 0.0;
-        }
-    }
+    GpuProfiler profiler;
 
     void initApp() override {
         loadSettings(settings);
-        initProfiling();
+        profiler.init(physicalDevice, device);
         // 진단용: 시작 시 특정 행성에 잠근다(SOLAR_LOCK=5 → 목성). 카메라를 직접 몰지 않고
         // 셰도우 맵 같은 시점 의존 기능을 재현하려고 둔 것이다.
         if (const char* lk = std::getenv("SOLAR_LOCK")) {
@@ -1705,8 +1613,7 @@ protected:
 
         // 여기는 펜스 대기 뒤라 직전 프레임의 컴퓨트 결과가 확정돼 있다. 0으로 리셋하기
         // 직전에 스냅샷을 떠 둔다(onFrameStart에서 읽으면 아직 GPU가 채우기 전이라 0이 나온다).
-        if (profiling && indirectDrawMapped)   // 오버레이의 LOD 표시도 이 스냅샷을 쓴다
-            memcpy(lastDrawCmds, indirectDrawMapped, 12 * sizeof(VkDrawIndexedIndirectCommand));
+        profiler.snapshotDrawCmds(indirectDrawMapped);   // 오버레이의 LOD 표시도 이 스냅샷을 쓴다
 
         memcpy(indirectDrawMapped, drawCmdTemplates, 12 * sizeof(VkDrawIndexedIndirectCommand));
 
@@ -1759,7 +1666,7 @@ protected:
             ImGui::End();
         }
 
-        if (settings.showGpuTimes && profiling) {
+        if (settings.showGpuTimes && profiler.enabled()) {
             // FPS만으로는 '느리다'는 것만 알 뿐 어디가 느린지 알 수 없다. 패스별로 나눠
             // 보여줘야 MSAA, 소행성 수, 대기 셰이더 중 무엇을 손댈지 정할 수 있다.
             //
@@ -1769,14 +1676,14 @@ protected:
             ImGui::SetNextWindowBgAlpha(0.55f);
             ImGui::Begin("GPU Times", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize);
             double total = 0.0;
-            for (int i = 0; i < 10; ++i) total += tsSmoothGpu[i];
+            for (int i = 0; i < 10; ++i) total += profiler.smoothMs(i);
             // 라벨은 반드시 ASCII로 쓴다. ImGui 기본 폰트에는 한글 글리프가 없어 전부 '?'가 된다.
             ImGui::Text("GPU %.2f ms  (max %.0f FPS)", total, total > 0.0 ? 1000.0 / total : 0.0);
             ImGui::Separator();
             for (int i = 0; i < 10; ++i) {
-                if (tsSmoothGpu[i] < 0.005) continue;   // 눈금 이하인 패스는 줄만 차지한다
-                ImGui::Text("%-12s %5.2f ms  %4.1f%%", TS_NAMES[i], tsSmoothGpu[i],
-                            total > 0.0 ? tsSmoothGpu[i] / total * 100.0 : 0.0);
+                if (profiler.smoothMs(i) < 0.005) continue;   // 눈금 이하인 패스는 줄만 차지한다
+                ImGui::Text("%-12s %5.2f ms  %4.1f%%", GpuProfiler::NAMES[i], profiler.smoothMs(i),
+                            total > 0.0 ? profiler.smoothMs(i) / total * 100.0 : 0.0);
             }
 
             // 소행성이 비싸 보일 때 개수 탓인지 LOD 탓인지 가르려면 이 줄이 필요하다.
@@ -1784,7 +1691,7 @@ protected:
             uint32_t perLod[3] = {}, tris = 0;
             for (int lod = 0; lod < 3; ++lod)
                 for (int type = 0; type < 4; ++type) {
-                    const auto &c = lastDrawCmds[lod * 4 + type];
+                    const auto &c = profiler.drawCmds()[lod * 4 + type];
                     perLod[lod] += c.instanceCount;
                     tris += c.instanceCount * (c.indexCount / 3);
                 }
@@ -2069,11 +1976,11 @@ protected:
 
         // 계측 항목은 개발자 세션에서만 보인다(SOLAR_PROFILE=1). 배포 실행에서는
         // 항목 자체가 없다 — 최종 사용자에게 필요한 정보가 아니고, 잘못 읽기도 쉽다.
-        if (devTools) {
-            if (!profiling) ImGui::BeginDisabled();
+        if (profiler.devTools()) {
+            if (!profiler.enabled()) ImGui::BeginDisabled();
             ImGui::Checkbox("Show GPU Times", &settings.showGpuTimes);
-            if (!profiling) ImGui::EndDisabled();
-            helpTip(profiling
+            if (!profiler.enabled()) ImGui::EndDisabled();
+            helpTip(profiler.enabled()
                     ? "Per-pass GPU timings in the bottom-left corner, so you can see\n"
                       "which pass a frame is actually spent in rather than guessing.\n"
                       "Also reports how many asteroids are drawn at each level of\n"
@@ -2138,18 +2045,12 @@ protected:
     }
     void setFullViewport(VkCommandBuffer cb) { setViewport(cb, swapChainExtent); } // 포스트/스왑체인 패스용
 
-    // 계측용: 패스 경계마다 타임스탬프를 찍는다. profiling이 꺼져 있으면 아무 일도 안 한다.
-    void tsMark(VkCommandBuffer cb, uint32_t slot) {
-        if (!profiling || tsPool == VK_NULL_HANDLE) return;
-        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, tsPool, slot);
-    }
-
     void recordCommandBuffer(VkCommandBuffer cb, uint32_t imageIndex) override {
         double recordStart = glfwGetTime();
         VkCommandBufferBeginInfo beginInfo{}; beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         vkBeginCommandBuffer(cb, &beginInfo);
-        if (profiling && tsPool != VK_NULL_HANDLE) vkCmdResetQueryPool(cb, tsPool, 0, TS_SLOTS);
-        tsMark(cb, 0);
+        profiler.resetPool(cb);
+        profiler.mark(cb, 0);
 
         // 벨트 행렬은 컴퓨트(LOD 판정)와 그래픽스(실제 그리기)가 똑같은 것을 써야 한다.
         // 예전에는 컴퓨트가 이걸 몰라서 소행성의 '절대 월드 좌표'를 '카메라 상대 좌표'인
@@ -2190,7 +2091,7 @@ protected:
         clearValues[0].color = {{0.01f, 0.01f, 0.01f, 1.0f}}; clearValues[1].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; clearValues[2].depthStencil = {1.0f, 0};
         offscreenPassInfo.clearValueCount = 3; offscreenPassInfo.pClearValues = clearValues.data();
         
-        tsMark(cb, 1);
+        profiler.mark(cb, 1);
         vkCmdBeginRenderPass(cb, &offscreenPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         setViewport(cb, renderExtent);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
@@ -2211,7 +2112,7 @@ protected:
             }
         }
 
-        tsMark(cb, 2); // 소행성 그리기 끝
+        profiler.mark(cb, 2); // 소행성 그리기 끝
         auto drawObject = [&](const Planet &p, glm::mat4 mat, int type) {
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &p.descriptorSet, 0, nullptr);
             PushConstants pc{mat, type, p.normalAmp}; vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
@@ -2252,7 +2153,7 @@ protected:
             drawObject(moon, moon.currentModelMat, moon.typeId);
         }
         
-        tsMark(cb, 3); // 천체 본체 끝 (다음은 스카이박스)
+        profiler.mark(cb, 3); // 천체 본체 끝 (다음은 스카이박스)
         // 스카이박스는 태양의 디스크립터 세트를 빌려 쓴다(큐브맵은 어느 세트에나 같이 들어 있다).
         // drawObject를 쓰지 않고 푸시 상수를 직접 만드는 이유: customData에 하늘 전환값을
         // 실어야 하기 때문이다. 타입 3 분기는 customData를 달리 쓰지 않으므로 자리가 비어 있다.
@@ -2270,7 +2171,7 @@ protected:
             vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0);
         }
         
-        tsMark(cb, 4); // 행성/스카이박스 끝
+        profiler.mark(cb, 4); // 행성/스카이박스 끝
 
         // 여기에는 멀리 축소했을 때 떠오르던 은하 원반(Milkyway.png를 입힌 판)이 있었다.
         // 하늘 큐브맵이 은하 안에서 밖을 본 모습인데 원반은 은하를 밖에서 본 모습이라,
@@ -2298,7 +2199,7 @@ protected:
         // =========================================================
         // 🚀 궤도선 렌더링 구역
         // =========================================================
-        tsMark(cb, 5); // 은하 끝
+        profiler.mark(cb, 5); // 은하 끝
         if (showOrbits) {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipeline);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sun.descriptorSet, 0, nullptr);
@@ -2349,7 +2250,7 @@ protected:
         // =========================================================
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-        tsMark(cb, 6); // 궤도선 끝
+        profiler.mark(cb, 6); // 궤도선 끝
         // 3. 거대한 태양 홍염 (Type 7) - 가까우면 숨김
         if (shouldRenderSun) {
             // 🚀 [수정됨] 태양 홍염도 리얼 스케일에 맞춰 거대하게 팽창합니다.
@@ -2368,7 +2269,7 @@ protected:
 
         vkCmdEndRenderPass(cb);
 
-        tsMark(cb, 7);
+        profiler.mark(cb, 7);
         // ── 밉체인 블룸 ──────────────────────────────────────────────────
         // 한 번의 draw = 전체화면 삼각형 하나. 렌더 타겟과 소스는 같은 이미지의 다른 밉이며,
         // 각 뷰가 한 밉만 덮으므로 레이아웃 전환이 서로 침범하지 않는다.
@@ -2405,7 +2306,7 @@ protected:
         std::array<VkClearValue, 2> swapClear{}; swapClear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; swapClear[1].depthStencil = {1.0f, 0};
         renderPassInfo.clearValueCount = 2; renderPassInfo.pClearValues = swapClear.data();
         
-        tsMark(cb, 8);
+        profiler.mark(cb, 8);
         vkCmdBeginRenderPass(cb, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         setFullViewport(cb);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipeline);
@@ -2415,10 +2316,10 @@ protected:
         vkCmdDraw(cb, 3, 1, 0, 0);
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cb);
         vkCmdEndRenderPass(cb);
-        tsMark(cb, 9);
-        tsMark(cb, 10);
+        profiler.mark(cb, 9);
+        profiler.mark(cb, 10);
         vkEndCommandBuffer(cb);
-        tsAccumCpuRecord += (glfwGetTime() - recordStart) * 1000.0;
+        profiler.addRecordMs((glfwGetTime() - recordStart) * 1000.0);
     }
 
     void cleanupApp() override {
@@ -2451,7 +2352,7 @@ protected:
         vkDestroyImageView(device, msaaColorView, nullptr); vkDestroyImage(device, msaaColorImage, nullptr); vkFreeMemory(device, msaaColorMem, nullptr);
         vkDestroyImageView(device, msaaBrightView, nullptr); vkDestroyImage(device, msaaBrightImage, nullptr); vkFreeMemory(device, msaaBrightMem, nullptr);
 
-        if (tsPool != VK_NULL_HANDLE) { vkDestroyQueryPool(device, tsPool, nullptr); tsPool = VK_NULL_HANDLE; }
+        profiler.destroy(device);
 
         vkDestroyImageView(device, viewSkybox, nullptr); vkDestroyImage(device, texSkybox, nullptr); vkFreeMemory(device, memSkybox, nullptr);
         if (viewSkyBand != VK_NULL_HANDLE) {
@@ -2924,7 +2825,7 @@ private:
             for (VkDeviceSize p = 0; p < srcLayerFloats; p += 4) {
                 dst[0] = glm::packHalf2x16(glm::vec2(src[p + 0], src[p + 1]));
                 dst[1] = glm::packHalf2x16(glm::vec2(src[p + 2], src[p + 3]));
-                if (devTools) {   // 검증은 SOLAR_PROFILE=1일 때만 (2500만 픽셀을 한 번 더 훑는다)
+                if (profiler.devTools()) {   // 검증은 SOLAR_PROFILE=1일 때만 (2500만 픽셀을 한 번 더 훑는다)
                     glm::vec2 rg = glm::unpackHalf2x16(dst[0]), ba = glm::unpackHalf2x16(dst[1]);
                     float back[4] = {rg.x, rg.y, ba.x, ba.y};
                     for (int c = 0; c < 4; ++c) {
@@ -2939,7 +2840,7 @@ private:
             // 🚀 tinyexr은 내부적으로 malloc을 쓰기 때문에 반드시 free()로 메모리를 해제해야 합니다.
             free(pixels[i]);
         }
-        if (devTools)
+        if (profiler.devTools())
             std::cout << "[skybox] fp16 변환 검증: 원본 최대값=" << maxOrig
                       << "  최대 절대오차=" << maxAbsErr
                       << "  값이 달라진 채널 수=" << nonZeroDiff

@@ -49,6 +49,7 @@ add_executable(Ephemeris
     src/main.cpp
     src/third_party_impl.cpp
     src/core/Settings.cpp
+    src/core/GpuProfiler.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
