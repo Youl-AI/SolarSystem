@@ -55,6 +55,8 @@ add_executable(Ephemeris
     src/gfx/MeshGen.cpp
     src/app/App_Textures.cpp
     src/app/App_Resources.cpp
+    src/app/App_Init.cpp
+    src/app/App_Input.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
