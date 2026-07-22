@@ -231,8 +231,9 @@ private:
 
 protected:
     void onFrameStart() override {
-        profiler.collect(device, asteroidTransforms.size());
         profiler.beginFrame(glfwGetTime());
+        profiler.collect(device, asteroidTransforms.size());
+        profiler.nextFrame();
         // VSync 변경은 present mode만 바꾸면 되므로 스왑체인 재생성으로 처리.
         if (settings.vsync != appliedVsync) {
             appliedVsync = settings.vsync;

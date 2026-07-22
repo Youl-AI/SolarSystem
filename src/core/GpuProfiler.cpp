@@ -36,6 +36,10 @@ void GpuProfiler::beginFrame(double nowSeconds) {
     if (!profiling_) return;
     if (lastFrameStart_ > 0.0) accumCpuFrame_ += (nowSeconds - lastFrameStart_) * 1000.0;
     lastFrameStart_ = nowSeconds;
+}
+
+void GpuProfiler::nextFrame() {
+    if (!profiling_) return;
     ++frameCount_;
 }
 
