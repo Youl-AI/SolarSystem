@@ -185,7 +185,7 @@ glm::vec3 StarCatalog::raDecToDir(double raDeg, double decDeg) {
 
 - [ ] **Step 3: `load`를 구현한다**
 
-세 CSV를 파싱한다. 각 줄을 `,`로 나누고 헤더는 건너뛴다.
+세 CSV를 파싱한다. 각 줄을 `,`로 나누고 헤더는 건너뛴다. **각 필드에서 앞뒤 공백과 `\r`을 트림한다**(`.gitattributes`가 LF로 고정하지만, 다른 환경에서 CRLF로 들어와도 이름이 `Orion\r`이 되지 않도록 방어한다). 빈 줄은 건너뛴다.
 - `stars.csv` → `stars_`와 `idToIndex_`. dir = `raDecToDir(ra,dec)`. (열은 `id,raDeg,decDeg` 세 개.)
 - `lines.csv` → 약자별로 edges 수집. 각 id를 `idToIndex_`로 인덱스화(없으면 그 간선은 건너뛰고 계속).
 - `names.csv` → 약자→라틴 맵.
