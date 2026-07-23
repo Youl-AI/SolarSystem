@@ -136,6 +136,19 @@ private:
     float currentAppTime = 0.0f;
     bool isPaused = false;
 
+    // updateUniformBuffer 프레임 갱신 상태. Task 10에서 함수 지역 static 변수였던 것을
+    // 멤버로 승격했다 (함수를 여러 단계로 쪼개면 static 지역 변수는 각 함수에 갇혀 서로 못 본다).
+    std::chrono::time_point<std::chrono::high_resolution_clock> lastTimePoint = std::chrono::high_resolution_clock::now();
+    bool spacePressedLastFrame = false;
+    float simulationTime = 0.0f;
+    bool isSimInit = false;
+    bool isFirstFrame = true;
+    float lastTargetRadius = 1.0f;
+    int   lastTargetType   = 1;
+    int   lastTargetIndex  = 2;
+    float appliedFov = -1.0f; // 첫 프레임에 로드된 FOV를 강제로 반영
+    float eclipseLerp = 0.0f;
+
     std::vector<VkImage> allImages;
     std::vector<VkDeviceMemory> allMemories;
     std::vector<VkImageView> allViews;
@@ -317,20 +330,16 @@ protected:
     void drawUi();
 
     void updateUniformBuffer() override {
-        static auto lastTimePoint = std::chrono::high_resolution_clock::now();
         auto currentTime = std::chrono::high_resolution_clock::now();
         float deltaTime = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - lastTimePoint).count();
         lastTimePoint = currentTime;
 
-        static bool spacePressedLastFrame = false;
         bool spacePressed = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
         if (spacePressed && !spacePressedLastFrame) isPaused = !isPaused;
         spacePressedLastFrame = spacePressed;
         if (!isPaused) currentAppTime += deltaTime;
-        float time = currentAppTime; 
+        float time = currentAppTime;
 
-        static float simulationTime = 0.0f;
-        static bool isSimInit = false;
         if (!isSimInit) { simulationTime = time * 0.5f; isSimInit = true; } // 첫 프레임 동기화
 
         if (isRealScaleMode) scaleLerp += deltaTime * 0.5f;
@@ -414,20 +423,24 @@ protected:
             targetRadius = glm::mix(moon.radius, moon.realRadius, easeScale);
         }
         
-        static bool isFirstFrame = true;
         if (isFirstFrame) {
             camera.target = nextTarget;
             camera.lastNewTarget = nextTarget;
             camera.targetDistance = targetRadius * 6.0f;
             camera.currentDistance = targetRadius * 6.0f;
+
+            // 프레임 1에서 last* 를 현재 값으로 시딩한다. 예전에는 이 세 개가 함수 지역
+            // static이라 첫 실행에서 targetRadius/lockedTargetType/lockedPlanetIndex를 캡처했다.
+            // 멤버로 올리면 그 캡처가 사라져, lastTargetRadius가 targetRadius와 달라지는 순간
+            // 아래 비율 보정 블록이 프레임 1에 돌아 카메라가 튄다. 여기서 같은 값으로 맞춰 준다.
+            lastTargetRadius = targetRadius;
+            lastTargetType   = lockedTargetType;
+            lastTargetIndex  = lockedPlanetIndex;
+
             isFirstFrame = false;
         }
 
         // 🚀 [NEW] 천체의 팽창/수축 배율을 프레임 단위로 실시간 추적하여 카메라에 완벽 동기화!
-        static float lastTargetRadius = targetRadius;
-        static int lastTargetType = lockedTargetType;
-        static int lastTargetIndex = lockedPlanetIndex;
-
         bool targetChanged = (lastTargetType != lockedTargetType || lastTargetIndex != lockedPlanetIndex);
 
         // 타겟이 바뀌지 않았을 때만 비율을 곱해줍니다. (다른 행성을 더블클릭할 때 화면이 확 튀는 현상 방지)
@@ -463,7 +476,6 @@ protected:
         // FOV 설정을 바꾸면 현재 화면에 즉시 반영한다. 설정을 바꾼 순간에는 텔레스코프 줌을 취소하고
         // 새 기본 시야각으로 스냅한다(스펙: "현재 줌 상태를 그에 맞춰 재계산"). 그 외 프레임에는
         // 아래로만 클램프해, 사용자가 스크롤로 줌인해 둔 상태(fov < baseFov)는 유지한다.
-        static float appliedFov = -1.0f; // 첫 프레임에 로드된 FOV를 강제로 반영
         camera.baseFov = settings.fovDegrees;
         if (settings.fovDegrees != appliedFov) {
             appliedFov = settings.fovDegrees;
@@ -475,7 +487,6 @@ protected:
         // =========================================================
         // 🚀 시네마틱 개기일식 (궤도 고정 & 감속 정지 연출)
         // =========================================================
-        static float eclipseLerp = 0.0f;
         // 1.5초 만에 카메라가 스무스하게 빨려 들어갑니다.
         if (isEclipseEvent) eclipseLerp += deltaTime * 0.75f; 
         else eclipseLerp -= deltaTime * 0.75f; 
