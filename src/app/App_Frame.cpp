@@ -264,9 +264,12 @@ void SolarSystemApp::applyEclipseCinematic(float deltaTime, float easeScale) {
 // 렌더되는 크기로 채운다(예전엔 sun.radius 고정이라 리얼 스케일에서 그림자 계산이 어긋났다).
 // 그래서 easeScale 하나만 받으면 충분하다.
 void SolarSystemApp::collectOccluders(UniformBufferObject &ubo, float easeScale) {
+    // 태양의 각반지름이 반그림자 폭을 결정하므로, 지금 실제로 렌더되는 크기를 써야 한다.
+    // (예전엔 sun.radius 고정이라 리얼 스케일에서 그림자 계산이 어긋났다)
     ubo.sunPos = relativeToCamera(sun.currentPosition);
     ubo.sunRadius = glm::mix(sun.radius, sun.realRadius, easeScale);
 
+    // ── 그림자를 주고받을 '계(系)'를 정한다 ──────────────────────────────
     // 잠근 대상이 위성이면 모행성계로 올라가고, 행성이면 자기 위성들을 모은다.
     shadowSystemIndices.clear();
     shadowSystemIncludesEarthMoon = false;
@@ -280,6 +283,7 @@ void SolarSystemApp::collectOccluders(UniformBufferObject &ubo, float easeScale)
         if (planets[i].parentIndex == primary) shadowSystemIndices.push_back(i);
     if (primary == 2) shadowSystemIncludesEarthMoon = true; // 달은 planets 밖에 따로 있다
 
+    // ── 해석적 그림자에 넘길 가림 천체들 ─────────────────────────────────
     // 위에서 고른 '계'를 그대로 쓴다. 행성끼리는 실제로 그림자를 드리우지 않으므로
     // 목록에 넣지 않는다(보기 좋으라고 궤도를 압축해 둔 탓에 생기는 가짜 그림자를 막는다).
     // 반지름은 리얼 스케일 전환 중에도 렌더되는 크기를 그대로 따라가도록 mix를 쓴다.
