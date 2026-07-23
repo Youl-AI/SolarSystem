@@ -195,10 +195,13 @@ void SolarSystemApp::initApp() {
     // IAU 88개 전부를 정적 버퍼에 올린다. 토글/호버는 이후 태스크에서 얹는다.
     if (starCatalog.load("data/constellations")) {
         std::vector<Vertex> cv; buildConstellationVertices(cv); // 전체(onlyAbbr 비움) = 88개 전부
-        // staticCap: lines.csv 전체 743개 간선 x SEG(8) x 2 = 11,888 정점. Task 4가 이 버퍼를
-        // 전체 카탈로그로 다시 채울 때 재할당 없이 들어가도록 여유 있게 잡는다.
+        // staticCap: lines.csv 전체 743개 간선 x SEG(8) x 2 = 11,888 정점. 여유 있게 잡는다.
         const uint32_t staticCap = 16384;
         uploadLines(constLineBuffer, constLineMem, constLineMapped, constLineVertexCount, staticCap, cv);
+        // growCap: 호버 버퍼는 한 별자리만 담는다. 간선이 가장 많은 별자리 기준으로 상한을 잡는다.
+        size_t maxEdges = 0;
+        for (const auto &c : starCatalog.constellations()) maxEdges = std::max(maxEdges, c.edges.size());
+        growCap = static_cast<uint32_t>(maxEdges * kConstSeg * 2) + 64;
     }
 
     createGraphicsPipeline();
@@ -279,6 +282,7 @@ void SolarSystemApp::cleanupApp() {
     vkDestroyBuffer(device, uniformBuffer, nullptr); vkFreeMemory(device, uniformBufferMemory, nullptr);
     vkDestroyBuffer(device, lockedOrbitBuffer, nullptr); vkFreeMemory(device, lockedOrbitMemory, nullptr);
     if (constLineBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(device, constLineBuffer, nullptr); vkFreeMemory(device, constLineMem, nullptr); }
+    if (growBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(device, growBuffer, nullptr); vkFreeMemory(device, growMem, nullptr); }
     vkDestroyDescriptorPool(device, descriptorPool, nullptr); vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
     vkDestroyPipeline(device, graphicsPipeline, nullptr); vkDestroyPipeline(device, linePipeline, nullptr); vkDestroyPipeline(device, constellationPipeline, nullptr); vkDestroyPipeline(device, atmospherePipeline, nullptr); vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 }
@@ -298,7 +302,7 @@ static glm::vec3 slerpDir(const glm::vec3 &a, const glm::vec3 &b, float t) {
 // 각 간선을 큰 원으로 SEG등분해 연속점마다 두 번 실어(LINE_LIST) 선분 목록으로 만든다.
 // 배경 구 반지름은 1.0(방향 벡터 그대로 — 스카이박스와 같은 단위구).
 void SolarSystemApp::buildConstellationVertices(std::vector<Vertex> &out, const std::string &onlyAbbr) {
-    const int SEG = 8; // 큰 원 분할 수
+    const int SEG = kConstSeg; // 큰 원 분할 수(성장 버퍼와 공유)
     out.clear();
     for (const auto &c : starCatalog.constellations()) {
         if (!onlyAbbr.empty() && c.abbr != onlyAbbr) continue;

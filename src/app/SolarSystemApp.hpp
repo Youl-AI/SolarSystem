@@ -141,6 +141,32 @@ private:
     uint32_t constLineVertexCount = 0;
     // 별자리 선 색(라벤더). 정점색으로 실려 프래그먼트에서 그대로 출력된다.
     static constexpr glm::vec3 kConstColor = glm::vec3(0.82f, 0.80f, 0.95f);
+    // 큰 원 분할 수. 정적 버퍼와 성장 버퍼가 같은 세분을 써야 겹칠 때 선이 어긋나지 않는다.
+    static constexpr int kConstSeg = 8;
+
+    // ── 호버(Task 6) + 성장 애니메이션(Task 7) ──────────────────────────
+    // 마우스가 가리키는 별자리와 그 뿌리 별(stars_ 인덱스). 없으면 -1.
+    int hoverConstellation = -1;
+    int hoverRootStar = -1;
+    int prevHoverConstellation = -1;
+    // 호버(또는 페이드 중) 별자리 하나만 담는 동적 버퍼. 성장 진행도까지만 채운다.
+    VkBuffer growBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory growMem = VK_NULL_HANDLE;
+    void *growMapped = nullptr;
+    uint32_t growVertexCount = 0;
+    uint32_t growCap = 0;             // 한 별자리 최대 정점 수(로드 시 계산)
+    // 성장 상태. growTime = 뿌리에서 번진 시간, growFadeOut = 호버 해제 후 사라짐(0..1).
+    float growTime = 0.0f;
+    float growFadeOut = 0.0f;
+    int fadingConstellation = -1;    // 호버 해제 뒤 잠시 자란 형태를 보여줄 별자리
+    std::vector<float> edgeDelay;    // 호버 별자리의 간선별 시작 지연(간선 순서와 일치)
+
+    // 마우스 위치에서 큐브맵(=카탈로그) 프레임의 하늘 방향을 만든다. 스카이박스 정점 경로의 역.
+    glm::vec3 mouseRayDir();
+    // 매 프레임 호버 별자리를 갱신하고 성장/페이드 상태를 진행한다.
+    void updateConstellationHover(float deltaTime);
+    // 호버 별자리를 growTime 진행도까지만 LINE_LIST 정점으로 만들어 growBuffer에 올린다.
+    void updateGrowBuffer();
 
     uint32_t sphereIndexCount = 0, ringIndexCount = 0, orbitIndexCount = 0, orbitFirstIndex = 0;
     int32_t ringVertexOffset = 0, orbitVertexOffset = 0;

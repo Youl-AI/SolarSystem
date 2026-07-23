@@ -339,6 +339,7 @@ void SolarSystemApp::updateUniformBuffer() {
 
     updateBodyPositions(slowTime, easeScale);
     updateCameraTracking(deltaTime, easeScale);
+    updateConstellationHover(deltaTime);
     applyEclipseCinematic(deltaTime, easeScale);
 
     // 반드시 일식 블록 '뒤'여야 한다. 저 블록이 camera.target을 한 번 더 덮어쓰기 때문에,
@@ -352,6 +353,45 @@ void SolarSystemApp::updateUniformBuffer() {
     uploadUbo(ubo, time);
 
     drawUi();
+}
+
+// 마우스 픽셀 -> 큐브맵(=카탈로그) 프레임의 하늘 단위 방향. 스카이박스 정점 경로의 역이다:
+// NDC -> inverse(proj) -> inverse(rotView) -> inverse(skyMat). 카메라 위치(평행이동)는 무시한다.
+glm::vec3 SolarSystemApp::mouseRayDir() {
+    double xpos, ypos; glfwGetCursorPos(window, &xpos, &ypos);
+    float ndcX = 2.0f * (float)xpos / swapChainExtent.width - 1.0f;
+    float ndcY = 2.0f * (float)ypos / swapChainExtent.height - 1.0f;
+    glm::mat4 proj = glm::perspective(glm::radians(camera.fov),
+        swapChainExtent.width / (float)swapChainExtent.height, 0.01f, 1000000.0f);
+    proj[1][1] *= -1;
+    glm::mat4 rotView = glm::mat4(glm::mat3(camera.getViewMatrix()));
+    glm::mat4 skyMat = glm::rotate(glm::mat4(1.0f), currentAppTime * glm::radians(0.5f), glm::vec3(0,1,0));
+    glm::vec4 eye = glm::inverse(proj) * glm::vec4(ndcX, ndcY, 0.5f, 1.0f);
+    glm::vec3 viewDir = glm::vec3(eye.x, eye.y, -1.0f);
+    glm::vec3 dir = glm::vec3(glm::inverse(skyMat) * glm::inverse(rotView) * glm::vec4(viewDir, 0.0f));
+    return glm::normalize(dir);
+}
+
+// 매 프레임 호버 별자리를 갱신한다. Task 6: 대상이 바뀌면 그 별자리 전체를 성장 버퍼에 담는다.
+void SolarSystemApp::updateConstellationHover(float deltaTime) {
+    (void)deltaTime;
+    hoverConstellation = -1; hoverRootStar = -1;
+    if (currentAppState == AppState::SIMULATION && !ImGui::GetIO().WantCaptureMouse) {
+        glm::vec3 rd = mouseRayDir();
+        int star = -1;
+        int c = starCatalog.pickNearest(rd, glm::radians(1.5f), star);
+        if (c >= 0) { hoverConstellation = c; hoverRootStar = star; }
+    }
+    if (hoverConstellation != prevHoverConstellation) {
+        prevHoverConstellation = hoverConstellation;
+        if (hoverConstellation >= 0) {
+            std::vector<Vertex> hv;
+            buildConstellationVertices(hv, starCatalog.constellations()[hoverConstellation].abbr);
+            uploadLines(growBuffer, growMem, growMapped, growVertexCount, growCap, hv);
+        } else {
+            growVertexCount = 0;
+        }
+    }
 }
 
 // 고정된 천체의 궤도를 double로 계산해 카메라 상대 좌표 정점으로 굽는다.

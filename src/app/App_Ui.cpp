@@ -104,25 +104,36 @@ void SolarSystemApp::drawUi() {
     if (settingsOpen) drawSettingsWindow();
 
     // 별자리 라틴명 라벨. 선(스카이박스 정점 경로)과 같은 proj*rotView*skyMat 조합으로
-    // centroidDir을 투영해 선과 같은 자리를 따라간다. 시뮬레이션에서 토글이 켜졌을 때만.
-    if (constLerp > 0.001f && currentAppState == AppState::SIMULATION) {
+    // centroidDir을 투영해 선과 같은 자리를 따라간다. 토글이 켜지면 전체를 은은히,
+    // 호버(또는 페이드 중) 별자리는 토글과 무관하게 밝게 강조한다.
+    int emphIdx = (hoverConstellation >= 0) ? hoverConstellation : fadingConstellation;
+    if ((constLerp > 0.001f || emphIdx >= 0) && currentAppState == AppState::SIMULATION) {
         glm::mat4 skyMat = glm::rotate(glm::mat4(1.0f), currentAppTime * glm::radians(0.5f), glm::vec3(0,1,0));
         glm::mat4 rotView = glm::mat4(glm::mat3(camera.getViewMatrix())); // 스카이박스와 동일: 회전만
         glm::mat4 proj = glm::perspective(glm::radians(camera.fov),
             swapChainExtent.width / (float)swapChainExtent.height, 0.01f, 1000000.0f);
         proj[1][1] *= -1;
         ImDrawList *dl = ImGui::GetForegroundDrawList();
-        ImU32 col = ImGui::GetColorU32(ImVec4(0.82f, 0.80f, 0.95f, constLerp * 0.8f));
-        for (const auto &c : starCatalog.constellations()) {
+        const auto &cons = starCatalog.constellations();
+        auto drawLabel = [&](int i, float alpha) {
+            const auto &c = cons[i];
             glm::vec4 clip = proj * rotView * skyMat * glm::vec4(c.centroidDir, 1.0f);
-            if (clip.w <= 0.0f) continue;                     // 카메라 뒤
+            if (clip.w <= 0.0f) return;                       // 카메라 뒤
             glm::vec3 ndc = glm::vec3(clip) / clip.w;
-            if (ndc.x < -1 || ndc.x > 1 || ndc.y < -1 || ndc.y > 1) continue; // 화면 밖
+            if (ndc.x < -1 || ndc.x > 1 || ndc.y < -1 || ndc.y > 1) return; // 화면 밖
             float sx = (ndc.x * 0.5f + 0.5f) * swapChainExtent.width;
             float sy = (ndc.y * 0.5f + 0.5f) * swapChainExtent.height;
             ImVec2 ts = ImGui::CalcTextSize(c.latin.c_str());
+            ImU32 col = ImGui::GetColorU32(ImVec4(0.82f, 0.80f, 0.95f, alpha));
             dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), col, c.latin.c_str()); // 중심 정렬
-        }
+        };
+        // 토글이 켜졌으면 전체를 은은히(강조 대상은 건너뛰고 아래서 밝게 다시 그린다).
+        if (constLerp > 0.001f)
+            for (int i = 0; i < (int)cons.size(); ++i)
+                if (i != emphIdx) drawLabel(i, constLerp * 0.8f);
+        // 호버/페이드 별자리는 밝게. 페이드 중이면 함께 흐려진다.
+        if (emphIdx >= 0)
+            drawLabel(emphIdx, (hoverConstellation >= 0) ? 0.95f : 0.95f * (1.0f - growFadeOut));
     }
 
     if (settings.showFps) {

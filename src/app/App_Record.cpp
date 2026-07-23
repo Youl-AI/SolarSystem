@@ -104,23 +104,32 @@ void SolarSystemApp::recordSky(VkCommandBuffer cb, float easeScale) {
         vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &skyPush);
         vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0);
 
-        // 별자리 선: 스카이박스와 같은 skyMat(단위구, 카메라 회전만 따라감)을 모델로 쓴다.
+        // 별자리 선: 정적 전체(토글, 은은) 위에 호버 별자리(성장 버퍼, 강조)를 겹쳐 그린다.
+        // 배경 큐브맵을 raDecToDir 규약과 일치하게 다시 구웠으므로(skybox-cube-convention),
+        // 정점(raDecToDir)이 스카이박스와 같은 skyMat만으로 별 위에 정확히 얹힌다.
         // vertexBuffers/offsets: recordOrbits 패턴과 동일하게, 그리고 나면 원래 버텍스 버퍼로 복구한다.
-        // constLerp로 페이드 — 토글 켜짐/꺼짐을 향해 App_Frame에서 전진한다.
-        if (constLineVertexCount > 0 && constLerp > 0.001f) {
-            float easeC = constLerp * constLerp * (3.0f - 2.0f * constLerp);
+        bool drawStatic = (constLineVertexCount > 0 && constLerp > 0.001f);
+        bool drawGrow   = (growVertexCount > 0);
+        if (drawStatic || drawGrow) {
             VkBuffer vertexBuffers[] = {vertexBuffer}; VkDeviceSize offsets[] = {0};
-            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, constellationPipeline);
             VkDeviceSize off = 0;
-            vkCmdBindVertexBuffers(cb, 0, 1, &constLineBuffer, &off);
-            // 배경 하늘 큐브맵을 raDecToDir 규약과 일치하게 다시 구웠으므로(skybox-cube-convention),
-            // 별자리 정점(raDecToDir)이 스카이박스와 같은 skyMat만으로 별 위에 정확히 얹힌다.
-            // customData = 알파. 0.5 = 켜둔 전체는 은은하게(미관 값).
-            PushConstants cp{skyMat, 12, easeC * 0.5f};
-            vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &cp);
-            vkCmdDraw(cb, constLineVertexCount, 1, 0, 0);
-            // 뒤(대기 등)가 기존 버텍스 버퍼를 기대하므로 복구
-            vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, constellationPipeline);
+            if (drawStatic) {
+                float easeC = constLerp * constLerp * (3.0f - 2.0f * constLerp);
+                vkCmdBindVertexBuffers(cb, 0, 1, &constLineBuffer, &off);
+                PushConstants cp{skyMat, 12, easeC * 0.5f}; // 0.5 = 켜둔 전체는 은은하게(미관 값)
+                vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &cp);
+                vkCmdDraw(cb, constLineVertexCount, 1, 0, 0);
+            }
+            if (drawGrow) {
+                // 호버(또는 페이드 중) 별자리를 강조 알파로 겹쳐 그린다. 페이드아웃 계수는 Task 7.
+                float a = 0.9f * (fadingConstellation >= 0 ? (1.0f - growFadeOut) : 1.0f);
+                vkCmdBindVertexBuffers(cb, 0, 1, &growBuffer, &off);
+                PushConstants cp{skyMat, 12, a};
+                vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &cp);
+                vkCmdDraw(cb, growVertexCount, 1, 0, 0);
+            }
+            vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets); // 뒤(대기 등)가 기대하는 버퍼로 복구
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
         }
     }
