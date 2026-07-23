@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# 별자리 데이터는 LF로 고정한다. C++ getline이 CRLF의 \r을 마지막 필드에 남겨
+# 이름이 "Orion\r"이 되는 것을 막는다(로더도 방어적으로 트림하지만 소스부터 LF로 둔다).
+data/constellations/*.csv text eol=lf
