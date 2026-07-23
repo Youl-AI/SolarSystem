@@ -21,6 +21,9 @@ struct GraphicsSettings {
     // 하늘의 사실성. 축척과는 별개의 축이라 따로 둔다 — 압축 축척으로 태양계를 보면서도
     // 맨눈에 실제로 보이는 별하늘을 볼 수 있어야 한다.
     bool  realStars       = false;
+    // 88개 IAU 별자리 선·이름을 하늘 위에 그린다. realStars와 같은 세션 전용 뷰 토글이라
+    // 저장하지 않는다(항상 OFF로 시작).
+    bool  constellations  = false;
     bool  asteroids       = true;   // 끄면 소행성대/카이퍼벨트를 통째로 건너뛴다
 };
 

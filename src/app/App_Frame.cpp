@@ -77,6 +77,10 @@ float SolarSystemApp::advanceSimulationTime() {
     starsLerp += (settings.realStars ? 1.0f : -1.0f) * deltaTime * 0.4f;
     starsLerp = std::clamp(starsLerp, 0.0f, 1.0f);
 
+    // 별자리 토글 페이드. 2.0 = 약 0.5초.
+    constLerp += (settings.constellations ? 1.0f : -1.0f) * deltaTime * 2.0f;
+    constLerp = std::clamp(constLerp, 0.0f, 1.0f);
+
     // 체험 버튼(isEclipseEvent)이 눌리지 않았을 때만 시간이 흐릅니다!
     if (!isEclipseEvent && !isPaused) {
         simulationTime += deltaTime * 0.5f;

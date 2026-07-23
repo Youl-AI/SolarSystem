@@ -466,6 +466,10 @@ void SolarSystemApp::drawSettingsWindow() {
             "Off is the long-exposure photograph look: millions of stars\n"
             "and a bright, colourful Milky Way. Independent of Real Scale.");
 
+    ImGui::Checkbox("Constellations", &settings.constellations);
+    helpTip("Draw the 88 IAU constellation lines and names over the sky.\n"
+            "Hover a star to trace its constellation.");
+
     if (!inSim) ImGui::EndDisabled();
 
     ImGui::Spacing();

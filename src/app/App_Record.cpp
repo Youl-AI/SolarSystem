@@ -106,14 +106,17 @@ void SolarSystemApp::recordSky(VkCommandBuffer cb, float easeScale) {
 
         // 별자리 선: 스카이박스와 같은 skyMat(단위구, 카메라 회전만 따라감)을 모델로 쓴다.
         // vertexBuffers/offsets: recordOrbits 패턴과 동일하게, 그리고 나면 원래 버텍스 버퍼로 복구한다.
-        if (constLineVertexCount > 0) {
+        // constLerp로 페이드 — 토글 켜짐/꺼짐을 향해 App_Frame에서 전진한다.
+        if (constLineVertexCount > 0 && constLerp > 0.001f) {
+            float easeC = constLerp * constLerp * (3.0f - 2.0f * constLerp);
             VkBuffer vertexBuffers[] = {vertexBuffer}; VkDeviceSize offsets[] = {0};
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, constellationPipeline);
             VkDeviceSize off = 0;
             vkCmdBindVertexBuffers(cb, 0, 1, &constLineBuffer, &off);
             // 배경 하늘 큐브맵을 raDecToDir 규약과 일치하게 다시 구웠으므로(skybox-cube-convention),
             // 별자리 정점(raDecToDir)이 스카이박스와 같은 skyMat만으로 별 위에 정확히 얹힌다.
-            PushConstants cp{skyMat, 12, 1.0f}; // customData=1.0 (완전 불투명)
+            // customData = 알파. 0.5 = 켜둔 전체는 은은하게(미관 값).
+            PushConstants cp{skyMat, 12, easeC * 0.5f};
             vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &cp);
             vkCmdDraw(cb, constLineVertexCount, 1, 0, 0);
             // 뒤(대기 등)가 기존 버텍스 버퍼를 기대하므로 복구

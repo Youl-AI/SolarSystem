@@ -23,8 +23,8 @@ void loadSettings(GraphicsSettings &s, const char *path) {
             else if (k == "showFps")         s.showFps = (std::stoi(v) != 0);
             else if (k == "showGpuTimes")    s.showGpuTimes = (std::stoi(v) != 0);
             else if (k == "fullscreen")      s.fullscreen = (std::stoi(v) != 0);
-            // orbitLines / realScale / realStars는 의도적으로 복원하지 않는다: 매 실행 항상 OFF로 시작하는
-            // 런타임 뷰 토글이다. (구버전 settings.ini에 남아 있어도 무시)
+            // orbitLines / realScale / realStars / constellations는 의도적으로 복원하지 않는다: 매 실행 항상
+            // OFF로 시작하는 런타임 뷰 토글이다. (구버전 settings.ini에 남아 있어도 무시)
         } catch (...) { /* 잘못된 값은 무시하고 기본값 유지 */ }
     }
 }
@@ -42,5 +42,5 @@ void saveSettings(const GraphicsSettings &s, const char *path) {
       << "showFps="         << (s.showFps ? 1 : 0) << "\n"
       << "showGpuTimes="    << (s.showGpuTimes ? 1 : 0) << "\n"
       << "fullscreen="      << (s.fullscreen ? 1 : 0) << "\n";
-    // orbitLines / realScale / realStars는 저장하지 않는다 — 항상 OFF로 시작하는 런타임 전용 뷰 토글.
+    // orbitLines / realScale / realStars / constellations는 저장하지 않는다 — 항상 OFF로 시작하는 런타임 전용 뷰 토글.
 }

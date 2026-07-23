@@ -46,6 +46,8 @@ private:
     bool isRealScaleMode = false;
     // 하늘 전환의 진행도(0 = 사진 같은 하늘, 1 = 맨눈으로 본 하늘). settings.realStars를 향해 전진한다.
     float starsLerp = 0.0f;
+    // 별자리 페이드 진행도(0 = 안 보임, 1 = 완전히 켜짐). settings.constellations를 향해 전진한다.
+    float constLerp = 0.0f;
     GraphicsSettings settings;
     bool showOrbits = false; // 디폴트는 OFF
     float scaleLerp = 0.0f;  // 0.0(시각 비율) ~ 1.0(리얼 비율) 사이를 스르륵 오가는 타이머

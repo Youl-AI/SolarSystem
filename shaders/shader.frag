@@ -683,7 +683,9 @@ void main() {
     }
     else if (fragObjectType == 12) { // 별자리 선
         outColor = vec4(fragColor, push.customData);
-        outBrightColor = vec4(0.0, 0.0, 0.0, 1.0);
+        // 블룸 타깃에는 관여하지 않는다(알파 0 = no-op). 알파 1로 검정을 쓰면 페이드 중에도
+        // 선 자리의 별 블룸을 온전히 도려내 어두운 금이 먼저 보인다.
+        outBrightColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
     // ---------------------------------------------------------
