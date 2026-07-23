@@ -190,11 +190,11 @@ void SolarSystemApp::initApp() {
         else if (p.name == "Titan") { p.realRadius = 0.20f; p.realOrbit = 12.2f; p.shadowSunShrink = 2.9f; }  // 실제 비 4.57
     }
 
-    // ── 별자리 선(Task 3) ────────────────────────────────────────────────
+    // ── 별자리 선 ────────────────────────────────────────────────────────
     // 실패해도 앱은 계속 진행한다 — 별자리만 비활성일 뿐 나머지 렌더링에는 영향이 없다.
-    // 게이트용으로 오리온 하나만 정적 버퍼에 올린다("Ori만"은 Task 4에서 전체로 바꾼다).
+    // IAU 88개 전부를 정적 버퍼에 올린다. 토글/호버는 이후 태스크에서 얹는다.
     if (starCatalog.load("data/constellations")) {
-        std::vector<Vertex> cv; buildConstellationVertices(cv, "Ori");
+        std::vector<Vertex> cv; buildConstellationVertices(cv); // 전체(onlyAbbr 비움) = 88개 전부
         // staticCap: lines.csv 전체 743개 간선 x SEG(8) x 2 = 11,888 정점. Task 4가 이 버퍼를
         // 전체 카탈로그로 다시 채울 때 재할당 없이 들어가도록 여유 있게 잡는다.
         const uint32_t staticCap = 16384;

@@ -111,7 +111,9 @@ void SolarSystemApp::recordSky(VkCommandBuffer cb, float easeScale) {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, constellationPipeline);
             VkDeviceSize off = 0;
             vkCmdBindVertexBuffers(cb, 0, 1, &constLineBuffer, &off);
-            PushConstants cp{skyMat, 12, 1.0f}; // customData=1.0 (완전 불투명, 게이트용)
+            // 배경 하늘 큐브맵을 raDecToDir 규약과 일치하게 다시 구웠으므로(skybox-cube-convention),
+            // 별자리 정점(raDecToDir)이 스카이박스와 같은 skyMat만으로 별 위에 정확히 얹힌다.
+            PushConstants cp{skyMat, 12, 1.0f}; // customData=1.0 (완전 불투명)
             vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &cp);
             vkCmdDraw(cb, constLineVertexCount, 1, 0, 0);
             // 뒤(대기 등)가 기존 버텍스 버퍼를 기대하므로 복구
