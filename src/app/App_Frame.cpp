@@ -52,6 +52,11 @@ void SolarSystemApp::buildBodyModelMatrices(float easeScale, float slowTime, flo
 // 같은 값을 써야 하기 때문이다.
 float SolarSystemApp::advanceSimulationTime() {
     auto currentTime = std::chrono::high_resolution_clock::now();
+    // 예전엔 lastTimePoint가 함수 지역 static이라 '첫 호출' 시점에 now()로 초기화됐다.
+    // 멤버로 올리면 객체 생성 시점(창·Vulkan·텍스처 로딩 몇 초 전)에 초기화되어, 첫 프레임
+    // deltaTime이 그 로딩 시간 전체가 되어 시뮬레이션이 몇 초어치 앞으로 튄다. isSimInit은
+    // 첫 프레임에만 false이므로, 여기서 lastTimePoint를 지금 시각으로 다시 맞춰 deltaTime≈0으로 만든다.
+    if (!isSimInit) lastTimePoint = currentTime;
     float deltaTime = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - lastTimePoint).count();
     lastTimePoint = currentTime;
 
