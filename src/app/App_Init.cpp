@@ -321,6 +321,36 @@ void SolarSystemApp::buildConstellationVertices(std::vector<Vertex> &out, const 
     }
 }
 
+// 호버(또는 페이드 중) 별자리를 growTime 진행도까지만 LINE_LIST 정점으로 만들어 growBuffer에 올린다.
+// 각 간선은 뿌리 쪽 끝(edgeFromX)에서 바깥으로, edgeDelay만큼 늦게 자란다. 물결처럼 번진다.
+void SolarSystemApp::updateGrowBuffer() {
+    int ci = (hoverConstellation >= 0) ? hoverConstellation : fadingConstellation;
+    if (ci < 0) { growVertexCount = 0; return; }
+    const Constellation &con = starCatalog.constellations()[ci];
+    const auto &st = starCatalog.stars();
+    const int SEG = kConstSeg;
+    std::vector<Vertex> gv;
+    for (size_t e = 0; e < con.edges.size(); ++e) {
+        float p = (growTime - edgeDelay[e]) / kEdgeDur;   // 이 간선의 진행도
+        if (p <= 0.0f) continue;                          // 아직 시작 전
+        if (p > 1.0f) p = 1.0f;
+        glm::vec3 a = edgeFromX[e] ? st[con.edges[e].x].dir : st[con.edges[e].y].dir; // 뿌리 쪽
+        glm::vec3 b = edgeFromX[e] ? st[con.edges[e].y].dir : st[con.edges[e].x].dir; // 바깥 쪽
+        int segCount = (int)std::ceil(p * SEG);
+        if (segCount < 1) segCount = 1;
+        glm::vec3 prev = a;
+        for (int s = 1; s <= segCount; ++s) {
+            float t = std::min((float)s / SEG, p);        // 마지막 조각은 p에서 멈춘다
+            glm::vec3 cur = slerpDir(a, b, t);
+            Vertex v0{}; v0.pos = prev; v0.color = kConstColor;
+            Vertex v1{}; v1.pos = cur;  v1.color = kConstColor;
+            gv.push_back(v0); gv.push_back(v1);
+            prev = cur;
+        }
+    }
+    uploadLines(growBuffer, growMem, growMapped, growVertexCount, growCap, gv);
+}
+
 // buf가 없으면 cap 용량으로 만들고, verts를 채운 뒤 count를 갱신한다.
 // HOST_VISIBLE|HOST_COHERENT라 매핑해 memcpy만 하면 된다 — 정적 선 버퍼(이번 태스크)와
 // Task 6/7의 동적 갱신 버퍼가 이 함수 하나를 공유한다.

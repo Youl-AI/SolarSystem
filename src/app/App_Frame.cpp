@@ -372,9 +372,9 @@ glm::vec3 SolarSystemApp::mouseRayDir() {
     return glm::normalize(dir);
 }
 
-// 매 프레임 호버 별자리를 갱신한다. Task 6: 대상이 바뀌면 그 별자리 전체를 성장 버퍼에 담는다.
+// 매 프레임 호버 별자리를 갱신하고 성장/페이드 상태를 진행한다.
 void SolarSystemApp::updateConstellationHover(float deltaTime) {
-    (void)deltaTime;
+    // 1. 피킹 — 마우스 광선에 1.5도 안으로 가장 가까운 별의 별자리.
     hoverConstellation = -1; hoverRootStar = -1;
     if (currentAppState == AppState::SIMULATION && !ImGui::GetIO().WantCaptureMouse) {
         glm::vec3 rd = mouseRayDir();
@@ -382,15 +382,58 @@ void SolarSystemApp::updateConstellationHover(float deltaTime) {
         int c = starCatalog.pickNearest(rd, glm::radians(1.5f), star);
         if (c >= 0) { hoverConstellation = c; hoverRootStar = star; }
     }
+
+    // 2. 호버 대상이 바뀌는 순간: 새 성장 시작, 또는 직전 별자리를 페이드아웃으로 넘긴다.
     if (hoverConstellation != prevHoverConstellation) {
-        prevHoverConstellation = hoverConstellation;
         if (hoverConstellation >= 0) {
-            std::vector<Vertex> hv;
-            buildConstellationVertices(hv, starCatalog.constellations()[hoverConstellation].abbr);
-            uploadLines(growBuffer, growMem, growMapped, growVertexCount, growCap, hv);
-        } else {
-            growVertexCount = 0;
+            // 새 성장: 페이드 취소, 시간 리셋, 뿌리 별에서 BFS로 간선별 지연을 매긴다.
+            fadingConstellation = -1; growFadeOut = 0.0f; growTime = 0.0f;
+            const Constellation &con = starCatalog.constellations()[hoverConstellation];
+            std::unordered_map<int,int> depth;                 // 전역 stars_ 인덱스 -> 뿌리 거리
+            std::vector<int> frontier;
+            depth[hoverRootStar] = 0; frontier.push_back(hoverRootStar);
+            for (size_t qi = 0; qi < frontier.size(); ++qi) {
+                auto it = con.adjacency.find(frontier[qi]);
+                if (it == con.adjacency.end()) continue;
+                for (int v : it->second)
+                    if (!depth.count(v)) { depth[v] = depth[frontier[qi]] + 1; frontier.push_back(v); }
+            }
+            // 뿌리와 끊긴 컴포넌트(일부 별자리는 선이 여러 갈래)는 각자 로컬 시드(깊이 0)에서 자란다.
+            for (const auto &kv : con.adjacency) {
+                if (depth.count(kv.first)) continue;
+                depth[kv.first] = 0;
+                std::vector<int> f2; f2.push_back(kv.first);
+                for (size_t qi = 0; qi < f2.size(); ++qi) {
+                    auto it = con.adjacency.find(f2[qi]);
+                    if (it == con.adjacency.end()) continue;
+                    for (int v : it->second)
+                        if (!depth.count(v)) { depth[v] = depth[f2[qi]] + 1; f2.push_back(v); }
+                }
+            }
+            edgeDelay.assign(con.edges.size(), 0.0f);
+            edgeFromX.assign(con.edges.size(), 1);
+            for (size_t e = 0; e < con.edges.size(); ++e) {
+                int dx = depth.count(con.edges[e].x) ? depth[con.edges[e].x] : 0;
+                int dy = depth.count(con.edges[e].y) ? depth[con.edges[e].y] : 0;
+                edgeDelay[e] = std::min(dx, dy) * kEdgeDur;     // 얕은 끝이 닿을 때 이 간선이 시작
+                edgeFromX[e] = (dx <= dy) ? 1 : 0;              // 그 얕은 끝에서 바깥으로 자란다
+            }
+        } else if (prevHoverConstellation >= 0) {
+            // 호버 해제: 직전 별자리를 자란 형태 그대로 두고 알파만 줄여 사라지게 한다.
+            fadingConstellation = prevHoverConstellation;
+            growFadeOut = 0.0f;
         }
+        prevHoverConstellation = hoverConstellation;
+    }
+
+    // 3. 시간 진행. 호버 중이면 성장, 아니면 페이드아웃.
+    if (hoverConstellation >= 0) {
+        growTime += deltaTime;
+        updateGrowBuffer();                        // 진행도까지만 다시 채운다
+    } else if (fadingConstellation >= 0) {
+        growFadeOut += deltaTime * 3.0f;           // 약 0.33초에 사라진다
+        if (growFadeOut >= 1.0f) { fadingConstellation = -1; growVertexCount = 0; }
+        // 성장 버퍼는 그대로(자란 형태 유지) — recordSky가 알파만 줄인다.
     }
 }
 

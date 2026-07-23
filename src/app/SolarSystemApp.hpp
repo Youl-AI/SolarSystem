@@ -160,6 +160,8 @@ private:
     float growFadeOut = 0.0f;
     int fadingConstellation = -1;    // 호버 해제 뒤 잠시 자란 형태를 보여줄 별자리
     std::vector<float> edgeDelay;    // 호버 별자리의 간선별 시작 지연(간선 순서와 일치)
+    std::vector<char> edgeFromX;     // 간선별 뿌리 쪽 끝: 1이면 edges[e].x에서 y로 자란다
+    static constexpr float kEdgeDur = 0.25f;  // 간선 하나가 다 자라는 시간(초)
 
     // 마우스 위치에서 큐브맵(=카탈로그) 프레임의 하늘 방향을 만든다. 스카이박스 정점 경로의 역.
     glm::vec3 mouseRayDir();
