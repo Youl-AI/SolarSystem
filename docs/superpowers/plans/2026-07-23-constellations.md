@@ -37,14 +37,15 @@ GUI 앱이라 서브에이전트는 실행하지 않는다(화면을 볼 수 없
 
 Task 1이 검증된 외부 소스를 아래 세 파일로 변환한다. 이후 모든 코드는 **이 포맷만** 읽으므로, 소스의 포맷이 무엇이든 코드 태스크는 영향받지 않는다. 위치: `data/constellations/`.
 
-`stars.csv` — 별자리 선이 참조하는 별. 헤더 한 줄 + `id,raDeg,decDeg,mag`:
+`stars.csv` — 별자리 선의 꼭짓점(노드). 헤더 한 줄 + `id,raDeg,decDeg`:
 ```
-id,raDeg,decDeg,mag
-32349,101.287,-16.716,-1.46
-27989,88.793,7.407,0.42
+id,raDeg,decDeg
+0,30.9748,42.3297
+1,17.433,35.6206
 ```
-- `id`: 원본 카탈로그 번호(HIP 등). 선 파일이 이 id로 별을 가리킨다.
-- `raDeg`: 적경 0~360도. `decDeg`: 적위 -90~+90도. `mag`: 겉보기 등급.
+- `id`: 노드 전역 정수 id(0부터). 선 파일이 이 id로 노드를 가리킨다.
+- `raDeg`: 적경(도, -180~360 어느 범위든 무방 — `raDecToDir`가 주기적으로 처리). `decDeg`: 적위 -90~+90도.
+- 등급 열은 없다. 소스(d3-celestial)가 선 데이터에 등급을 담지 않으며, 렌더·피킹에 쓰지 않는다.
 
 `lines.csv` — 별자리 선(간선). 헤더 + `constellation,idA,idB`:
 ```
@@ -134,7 +135,7 @@ git commit -m "Add constellation star and line data in a simple CSV format"
 - Consumes: Task 1의 CSV 파일
 - Produces:
   ```cpp
-  struct CatalogStar { int id; glm::vec3 dir; float magnitude; };
+  struct CatalogStar { int id; glm::vec3 dir; };  // 등급 열 없음(소스 미제공, 미사용)
   struct Constellation {
       std::string abbr;                       // "Ori"
       std::string latin;                      // "Orion"
@@ -185,7 +186,7 @@ glm::vec3 StarCatalog::raDecToDir(double raDeg, double decDeg) {
 - [ ] **Step 3: `load`를 구현한다**
 
 세 CSV를 파싱한다. 각 줄을 `,`로 나누고 헤더는 건너뛴다.
-- `stars.csv` → `stars_`와 `idToIndex_`. dir = `raDecToDir(ra,dec)`.
+- `stars.csv` → `stars_`와 `idToIndex_`. dir = `raDecToDir(ra,dec)`. (열은 `id,raDeg,decDeg` 세 개.)
 - `lines.csv` → 약자별로 edges 수집. 각 id를 `idToIndex_`로 인덱스화(없으면 그 간선은 건너뛰고 계속).
 - `names.csv` → 약자→라틴 맵.
 - 약자별로 `Constellation`을 만든다: edges(전역 stars_ 인덱스 쌍), adjacency(각 간선의 양끝 전역 인덱스를 서로의 이웃 목록에 추가 — `adjacency[e.x].push_back(e.y)`와 그 반대), centroidDir(그 별자리가 쓰는 별들의 dir 평균을 정규화), latin(맵에서, 없으면 약자 그대로).
