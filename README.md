@@ -216,6 +216,7 @@ scripts\run_dev.bat
 | 자산 | 출처 | 라이선스 |
 |---|---|---|
 | 별하늘 (`skybox_stars.dds`, `skybox_band.dds`) | NASA SVS [Deep Star Maps 2020](https://svs.gsfc.nasa.gov/4851/) — Gaia DR2 + Hipparcos-2 + Tycho-2, 별 17억 개 | 퍼블릭 도메인 (아래 크레딧 필수) |
+| 별자리 선·이름 (`data/constellations/`) | [d3-celestial](https://github.com/ofrohn/d3-celestial) — Olaf Frohn ([`SOURCE.md`](data/constellations/SOURCE.md) 참조) | [BSD 2-Clause](https://github.com/ofrohn/d3-celestial/blob/master/LICENSE) |
 | 행성 텍스처 (`textures/planets/`) | [Solar System Scope](https://www.solarsystemscope.com/textures/) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
 | 목성 (`jupiter.dds`) | Askaniy Anpilogov / Björn Jónsson — Cassini(2000) + Juno 극지방, 14400×7200 | [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) |
 | 지구 (`earth_*.dds`, `earth_normal.dds`) | NASA Blue Marble NG 2004-08, Black Marble 2016, Blue Marble 구름(2001), NOAA ETOPO 2022 | 퍼블릭 도메인 |
