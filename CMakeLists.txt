@@ -57,6 +57,7 @@ add_executable(Ephemeris
     src/app/App_Resources.cpp
     src/app/App_Init.cpp
     src/app/App_Input.cpp
+    src/app/App_Ui.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
