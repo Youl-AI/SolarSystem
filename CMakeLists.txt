@@ -52,6 +52,7 @@ add_executable(Ephemeris
     src/core/GpuProfiler.cpp
     src/sim/CelestialData.cpp
     src/sim/AsteroidBelt.cpp
+    src/sim/StarCatalog.cpp
     src/gfx/MeshGen.cpp
     src/app/App_Textures.cpp
     src/app/App_Resources.cpp
