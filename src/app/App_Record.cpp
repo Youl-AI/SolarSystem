@@ -103,6 +103,21 @@ void SolarSystemApp::recordSky(VkCommandBuffer cb, float easeScale) {
         PushConstants skyPush{skyMat, 3, easeStars};
         vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &skyPush);
         vkCmdDrawIndexed(cb, sphereIndexCount, 1, 0, 0, 0);
+
+        // 별자리 선: 스카이박스와 같은 skyMat(단위구, 카메라 회전만 따라감)을 모델로 쓴다.
+        // vertexBuffers/offsets: recordOrbits 패턴과 동일하게, 그리고 나면 원래 버텍스 버퍼로 복구한다.
+        if (constLineVertexCount > 0) {
+            VkBuffer vertexBuffers[] = {vertexBuffer}; VkDeviceSize offsets[] = {0};
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, constellationPipeline);
+            VkDeviceSize off = 0;
+            vkCmdBindVertexBuffers(cb, 0, 1, &constLineBuffer, &off);
+            PushConstants cp{skyMat, 12, 1.0f}; // customData=1.0 (완전 불투명, 게이트용)
+            vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &cp);
+            vkCmdDraw(cb, constLineVertexCount, 1, 0, 0);
+            // 뒤(대기 등)가 기존 버텍스 버퍼를 기대하므로 복구
+            vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        }
     }
 }
 

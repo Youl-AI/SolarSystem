@@ -52,6 +52,7 @@ void SolarSystemApp::recreateOffscreenForMsaa() {
     // resolve 대상 뷰만 새로 바인딩한다.
     vkDestroyPipeline(device, graphicsPipeline, nullptr);
     vkDestroyPipeline(device, linePipeline, nullptr);
+    vkDestroyPipeline(device, constellationPipeline, nullptr);
     vkDestroyPipeline(device, atmospherePipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 
@@ -512,6 +513,14 @@ void SolarSystemApp::createGraphicsPipeline() {
 
     inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
     vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &linePipeline);
+
+    // 별자리 선: 끊긴 간선 그래프라 LINE_LIST. 배경(먼 깊이)에 얹으므로 깊이 쓰기는 끈다
+    // (행성이 이미 쓴 깊이로 LEQUAL 테스트만 하면 앞의 행성이 선을 가린다).
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    depthStencil.depthWriteEnable = VK_FALSE;
+    vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &constellationPipeline);
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; // 뒤 파이프라인을 위해 원복
+    depthStencil.depthWriteEnable = VK_TRUE;
 
     // 대기 껍질용. 두 가지만 다르다.
     // - 깊이를 쓰지 않는다: 껍질은 행성보다 커서, 깊이를 남기면 나중에 그리는 위성이나

@@ -7,6 +7,7 @@
 #include "../core/GpuProfiler.hpp"
 #include "../sim/CelestialData.hpp"
 #include "../sim/AsteroidBelt.hpp"
+#include "../sim/StarCatalog.hpp"
 #include "../gfx/MeshGen.hpp"
 
 #include <glm/gtc/packing.hpp>   // packHalf2x16: 스카이박스를 fp16으로 접어 올린다
@@ -61,6 +62,8 @@ private:
     VkPipelineLayout pipelineLayout;
     VkPipeline graphicsPipeline;
     VkPipeline linePipeline;
+    // 별자리 선 전용. LINE_LIST, 깊이 쓰기 없음(배경에 얹기만 한다).
+    VkPipeline constellationPipeline;
     // 대기 껍질 전용. 깊이를 쓰지 않고 가산 블렌딩을 쓴다는 점만 다르다.
     VkPipeline atmospherePipeline;
     VkDescriptorPool descriptorPool;
@@ -125,6 +128,17 @@ private:
     void* lockedOrbitMapped = nullptr;
     bool lockedOrbitValid = false;
     std::vector<Vertex> lockedOrbitScratch; // 매 프레임 재사용해 힙 할당을 피한다
+
+    // ── 별자리 선 ─────────────────────────────────────────────────────────
+    // data/constellations/{stars,lines,names}.csv를 읽는 순수 데이터 모듈. 렌더링 의존성 없음.
+    StarCatalog starCatalog;
+    // 정적 선 버퍼(현재는 게이트용 오리온 하나). Task 6/7의 동적 버퍼도 uploadLines를 함께 쓴다.
+    VkBuffer constLineBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory constLineMem = VK_NULL_HANDLE;
+    void *constLineMapped = nullptr;
+    uint32_t constLineVertexCount = 0;
+    // 별자리 선 색(라벤더). 정점색으로 실려 프래그먼트에서 그대로 출력된다.
+    static constexpr glm::vec3 kConstColor = glm::vec3(0.82f, 0.80f, 0.95f);
 
     uint32_t sphereIndexCount = 0, ringIndexCount = 0, orbitIndexCount = 0, orbitFirstIndex = 0;
     int32_t ringVertexOffset = 0, orbitVertexOffset = 0;
@@ -468,6 +482,14 @@ private:
     void updateLockedOrbitLine(float easeScale, float slowTime);
 
     void createLockedOrbitBuffer();
+
+    // 별자리 간선 목록 -> LINE_LIST 정점(색 = kConstColor). onlyAbbr가 비어있지 않으면 그 별자리만.
+    void buildConstellationVertices(std::vector<Vertex> &out, const std::string &onlyAbbr = "");
+
+    // buf가 없으면 cap 용량으로 만들고, verts를 채운 뒤 count를 갱신한다.
+    // HOST_VISIBLE|HOST_COHERENT라 매핑해 memcpy만 하면 된다(동적 갱신에도 재사용).
+    void uploadLines(VkBuffer &buf, VkDeviceMemory &mem, void *&mapped,
+                      uint32_t &count, uint32_t cap, const std::vector<Vertex> &verts);
 
     void createVertexBuffer();
 

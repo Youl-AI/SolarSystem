@@ -190,6 +190,17 @@ void SolarSystemApp::initApp() {
         else if (p.name == "Titan") { p.realRadius = 0.20f; p.realOrbit = 12.2f; p.shadowSunShrink = 2.9f; }  // 실제 비 4.57
     }
 
+    // ── 별자리 선(Task 3) ────────────────────────────────────────────────
+    // 실패해도 앱은 계속 진행한다 — 별자리만 비활성일 뿐 나머지 렌더링에는 영향이 없다.
+    // 게이트용으로 오리온 하나만 정적 버퍼에 올린다("Ori만"은 Task 4에서 전체로 바꾼다).
+    if (starCatalog.load("data/constellations")) {
+        std::vector<Vertex> cv; buildConstellationVertices(cv, "Ori");
+        // staticCap: lines.csv 전체 743개 간선 x SEG(8) x 2 = 11,888 정점. Task 4가 이 버퍼를
+        // 전체 카탈로그로 다시 채울 때 재할당 없이 들어가도록 여유 있게 잡는다.
+        const uint32_t staticCap = 16384;
+        uploadLines(constLineBuffer, constLineMem, constLineMapped, constLineVertexCount, staticCap, cv);
+    }
+
     createGraphicsPipeline();
     initImGui();
 }
@@ -267,6 +278,57 @@ void SolarSystemApp::cleanupApp() {
     vkDestroyBuffer(device, vertexBuffer, nullptr); vkFreeMemory(device, vertexBufferMemory, nullptr);
     vkDestroyBuffer(device, uniformBuffer, nullptr); vkFreeMemory(device, uniformBufferMemory, nullptr);
     vkDestroyBuffer(device, lockedOrbitBuffer, nullptr); vkFreeMemory(device, lockedOrbitMemory, nullptr);
+    if (constLineBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(device, constLineBuffer, nullptr); vkFreeMemory(device, constLineMem, nullptr); }
     vkDestroyDescriptorPool(device, descriptorPool, nullptr); vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-    vkDestroyPipeline(device, graphicsPipeline, nullptr); vkDestroyPipeline(device, linePipeline, nullptr); vkDestroyPipeline(device, atmospherePipeline, nullptr); vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    vkDestroyPipeline(device, graphicsPipeline, nullptr); vkDestroyPipeline(device, linePipeline, nullptr); vkDestroyPipeline(device, constellationPipeline, nullptr); vkDestroyPipeline(device, atmospherePipeline, nullptr); vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+}
+
+// 두 방향 벡터 사이를 단위구 위에서 대원(great circle)으로 보간한다(선형 보간은 현이 되어
+// 구 표면에서 벗어난다). ang이 0에 가까우면(거의 같은 방향) sin(ang)로 나누는 것이 불안정해
+// 그냥 선형 보간 + 정규화로 대체한다.
+static glm::vec3 slerpDir(const glm::vec3 &a, const glm::vec3 &b, float t) {
+    float d = glm::clamp(glm::dot(a, b), -1.0f, 1.0f);
+    float ang = std::acos(d);
+    if (ang < 1e-4f) return glm::normalize(glm::mix(a, b, t));
+    float s = std::sin(ang);
+    return glm::normalize((std::sin((1.0f - t) * ang) / s) * a + (std::sin(t * ang) / s) * b);
+}
+
+// 별자리 간선 목록 -> LINE_LIST 정점. onlyAbbr가 비어있지 않으면 그 별자리만.
+// 각 간선을 큰 원으로 SEG등분해 연속점마다 두 번 실어(LINE_LIST) 선분 목록으로 만든다.
+// 배경 구 반지름은 1.0(방향 벡터 그대로 — 스카이박스와 같은 단위구).
+void SolarSystemApp::buildConstellationVertices(std::vector<Vertex> &out, const std::string &onlyAbbr) {
+    const int SEG = 8; // 큰 원 분할 수
+    out.clear();
+    for (const auto &c : starCatalog.constellations()) {
+        if (!onlyAbbr.empty() && c.abbr != onlyAbbr) continue;
+        for (const auto &e : c.edges) {
+            glm::vec3 a = starCatalog.stars()[e.x].dir;
+            glm::vec3 b = starCatalog.stars()[e.y].dir;
+            glm::vec3 prev = a;
+            for (int s = 1; s <= SEG; ++s) {
+                glm::vec3 cur = slerpDir(a, b, (float)s / SEG);
+                Vertex v0{}; v0.pos = prev; v0.color = kConstColor;
+                Vertex v1{}; v1.pos = cur;  v1.color = kConstColor;
+                out.push_back(v0); out.push_back(v1); // LINE_LIST 한 선분
+                prev = cur;
+            }
+        }
+    }
+}
+
+// buf가 없으면 cap 용량으로 만들고, verts를 채운 뒤 count를 갱신한다.
+// HOST_VISIBLE|HOST_COHERENT라 매핑해 memcpy만 하면 된다 — 정적 선 버퍼(이번 태스크)와
+// Task 6/7의 동적 갱신 버퍼가 이 함수 하나를 공유한다.
+void SolarSystemApp::uploadLines(VkBuffer &buf, VkDeviceMemory &mem, void *&mapped,
+                                 uint32_t &count, uint32_t cap, const std::vector<Vertex> &verts) {
+    if (buf == VK_NULL_HANDLE) {
+        VkDeviceSize bufferSize = sizeof(Vertex) * cap;
+        createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     buf, mem);
+        vkMapMemory(device, mem, 0, bufferSize, 0, &mapped);
+    }
+    count = static_cast<uint32_t>(verts.size());
+    if (count > 0) memcpy(mapped, verts.data(), sizeof(Vertex) * count);
 }

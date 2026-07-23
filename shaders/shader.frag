@@ -681,6 +681,11 @@ void main() {
         outBrightColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
+    else if (fragObjectType == 12) { // 별자리 선
+        outColor = vec4(fragColor, push.customData);
+        outBrightColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
     // ---------------------------------------------------------
     // 🪨 소행성대 및 카이퍼 벨트 (오브젝트 타입 8) - 리얼 바위 셰이더
     // ---------------------------------------------------------

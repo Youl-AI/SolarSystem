@@ -46,9 +46,9 @@ void main() {
     fragObjectType = push.objectType;
     fragTexCube = inPosition;
     
-    if (push.objectType == 3) {
-        // 스카이박스
-        mat4 rotView = mat4(mat3(ubo.view)); 
+    if (push.objectType == 3 || push.objectType == 12) {
+        // 스카이박스 (12 = 별자리 선. 같은 배경 변환을 쓴다)
+        mat4 rotView = mat4(mat3(ubo.view));
         vec4 pos = ubo.proj * rotView * instanceModel * vec4(inPosition, 1.0);
         gl_Position = pos.xyww;
         fragPos = vec3(0.0);
