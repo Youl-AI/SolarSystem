@@ -103,6 +103,28 @@ void SolarSystemApp::drawUi() {
     applyLiveSettings();            // settings -> 기존 상태 동기화 (창이 닫혀 있어도 매 프레임)
     if (settingsOpen) drawSettingsWindow();
 
+    // 별자리 라틴명 라벨. 선(스카이박스 정점 경로)과 같은 proj*rotView*skyMat 조합으로
+    // centroidDir을 투영해 선과 같은 자리를 따라간다. 시뮬레이션에서 토글이 켜졌을 때만.
+    if (constLerp > 0.001f && currentAppState == AppState::SIMULATION) {
+        glm::mat4 skyMat = glm::rotate(glm::mat4(1.0f), currentAppTime * glm::radians(0.5f), glm::vec3(0,1,0));
+        glm::mat4 rotView = glm::mat4(glm::mat3(camera.getViewMatrix())); // 스카이박스와 동일: 회전만
+        glm::mat4 proj = glm::perspective(glm::radians(camera.fov),
+            swapChainExtent.width / (float)swapChainExtent.height, 0.01f, 1000000.0f);
+        proj[1][1] *= -1;
+        ImDrawList *dl = ImGui::GetForegroundDrawList();
+        ImU32 col = ImGui::GetColorU32(ImVec4(0.82f, 0.80f, 0.95f, constLerp * 0.8f));
+        for (const auto &c : starCatalog.constellations()) {
+            glm::vec4 clip = proj * rotView * skyMat * glm::vec4(c.centroidDir, 1.0f);
+            if (clip.w <= 0.0f) continue;                     // 카메라 뒤
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.x < -1 || ndc.x > 1 || ndc.y < -1 || ndc.y > 1) continue; // 화면 밖
+            float sx = (ndc.x * 0.5f + 0.5f) * swapChainExtent.width;
+            float sy = (ndc.y * 0.5f + 0.5f) * swapChainExtent.height;
+            ImVec2 ts = ImGui::CalcTextSize(c.latin.c_str());
+            dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), col, c.latin.c_str()); // 중심 정렬
+        }
+    }
+
     if (settings.showFps) {
         ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
         ImGui::Begin("FPS", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs);
