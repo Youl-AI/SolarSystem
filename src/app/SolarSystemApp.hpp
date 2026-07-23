@@ -134,7 +134,7 @@ private:
     // ── 별자리 선 ─────────────────────────────────────────────────────────
     // data/constellations/{stars,lines,names}.csv를 읽는 순수 데이터 모듈. 렌더링 의존성 없음.
     StarCatalog starCatalog;
-    // 정적 선 버퍼(현재는 게이트용 오리온 하나). Task 6/7의 동적 버퍼도 uploadLines를 함께 쓴다.
+    // 정적 선 버퍼(IAU 88개 전부). 호버 성장용 동적 버퍼(growBuffer)도 uploadLines를 함께 쓴다.
     VkBuffer constLineBuffer = VK_NULL_HANDLE;
     VkDeviceMemory constLineMem = VK_NULL_HANDLE;
     void *constLineMapped = nullptr;
@@ -161,6 +161,7 @@ private:
     int fadingConstellation = -1;    // 호버 해제 뒤 잠시 자란 형태를 보여줄 별자리
     std::vector<float> edgeDelay;    // 호버 별자리의 간선별 시작 지연(간선 순서와 일치)
     std::vector<char> edgeFromX;     // 간선별 뿌리 쪽 끝: 1이면 edges[e].x에서 y로 자란다
+    std::vector<Vertex> growScratch; // updateGrowBuffer가 매 프레임 재사용(힙 할당 회피)
     static constexpr float kEdgeDur = 0.25f;  // 간선 하나가 다 자라는 시간(초)
 
     // 마우스 위치에서 큐브맵(=카탈로그) 프레임의 하늘 방향을 만든다. 스카이박스 정점 경로의 역.

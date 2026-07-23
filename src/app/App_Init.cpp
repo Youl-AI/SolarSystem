@@ -329,7 +329,8 @@ void SolarSystemApp::updateGrowBuffer() {
     const Constellation &con = starCatalog.constellations()[ci];
     const auto &st = starCatalog.stars();
     const int SEG = kConstSeg;
-    std::vector<Vertex> gv;
+    std::vector<Vertex> &gv = growScratch; // 매 프레임 재사용해 힙 할당을 피한다(lockedOrbitScratch 패턴)
+    gv.clear();
     for (size_t e = 0; e < con.edges.size(); ++e) {
         float p = (growTime - edgeDelay[e]) / kEdgeDur;   // 이 간선의 진행도
         if (p <= 0.0f) continue;                          // 아직 시작 전
@@ -364,5 +365,8 @@ void SolarSystemApp::uploadLines(VkBuffer &buf, VkDeviceMemory &mem, void *&mapp
         vkMapMemory(device, mem, 0, bufferSize, 0, &mapped);
     }
     count = static_cast<uint32_t>(verts.size());
+    // 버퍼는 cap 용량으로 잡혀 있다. 데이터가 커져 cap을 넘으면 매핑 영역 밖으로 memcpy해
+    // 힙이 조용히 손상되므로, 넘치면 잘라 안전하게 막는다(정상 데이터에선 발생하지 않는다).
+    if (count > cap) count = cap;
     if (count > 0) memcpy(mapped, verts.data(), sizeof(Vertex) * count);
 }
