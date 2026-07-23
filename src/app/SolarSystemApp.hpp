@@ -343,7 +343,7 @@ protected:
     void setFullViewport(VkCommandBuffer cb) { setViewport(cb, swapChainExtent); } // 포스트/스왑체인 패스용
 
     void recordCompute(VkCommandBuffer cb, float easeScale, glm::mat4 astRot, VkExtent2D renderExtent);
-    void recordAsteroids(VkCommandBuffer cb, float easeScale, float beltScale, glm::mat4 astRot, VkExtent2D renderExtent);
+    void recordAsteroids(VkCommandBuffer cb, float easeScale, glm::mat4 astRot, VkExtent2D renderExtent);
     void recordBodies(VkCommandBuffer cb);
     void recordSky(VkCommandBuffer cb, float easeScale);
     void recordAtmosphere(VkCommandBuffer cb);
@@ -371,11 +371,6 @@ protected:
         glm::mat4 astRot = glm::translate(glm::mat4(1.0f), relativeToCamera(glm::dvec3(0.0)))
                          * glm::rotate(glm::mat4(1.0f), currentAppTime * 0.05f, glm::vec3(0.0f, 1.0f, 0.0f));
 
-        // beltScale: 예전 버전엔 벨트 전체 확대 배율이 여기서 계산됐으나, 지금은 컴퓨트 셰이더가
-        // 소행성마다 든 배율로 처리한다(cullPush/AsteroidCullPush 참고). recordAsteroids 시그니처
-        // 호환을 위해서만 남겨 둔 값이며, 실제로는 쓰이지 않는다(동작에 영향 없음).
-        float beltScale = 0.0f;
-
         recordCompute(cb, easeScale, astRot, renderExtent);
 
         VkRenderPassBeginInfo offscreenPassInfo{}; offscreenPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -388,7 +383,7 @@ protected:
         
         profiler.mark(cb, 1);
         vkCmdBeginRenderPass(cb, &offscreenPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        recordAsteroids(cb, easeScale, beltScale, astRot, renderExtent);
+        recordAsteroids(cb, easeScale, astRot, renderExtent);
 
         profiler.mark(cb, 2); // 소행성 그리기 끝
         recordBodies(cb);

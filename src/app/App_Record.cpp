@@ -21,7 +21,7 @@ void SolarSystemApp::recordCompute(VkCommandBuffer cb, float easeScale, glm::mat
     vkCmdBindVertexBuffers(cb, 0, 1, vertexBuffers, offsets); vkCmdBindIndexBuffer(cb, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 }
 
-void SolarSystemApp::recordAsteroids(VkCommandBuffer cb, float easeScale, float beltScale, glm::mat4 astRot, VkExtent2D renderExtent) {
+void SolarSystemApp::recordAsteroids(VkCommandBuffer cb, float easeScale, glm::mat4 astRot, VkExtent2D renderExtent) {
     // vertexBuffers/offsets: recordCompute에서 만든 것과 같은 값. 지역 배열이라 함수 경계를 못 넘으므로 다시 선언한다.
     VkBuffer vertexBuffers[] = {vertexBuffer}; VkDeviceSize offsets[] = {0};
     setViewport(cb, renderExtent);
